@@ -151,25 +151,65 @@ pub fn deleteSession() !DeleteOutcome {
     return mutation.delete();
 }
 
+fn isUnrecoverableRefreshError(err: anyerror) bool {
+    return err == error.AccessDenied or
+        err == error.ExpiredToken or
+        err == error.InvalidClient or
+        err == error.InvalidOAuthResponse or
+        err == error.OAuthRequestFailed or
+        err == error.NoRefreshToken;
+}
+
 pub fn loadValidAccessToken(
     alloc: Allocator,
     transport: oauth_transport.Provider,
     now_ms: i64,
 ) !?[]u8 {
     if (comptime host_target.is_wasm) return null;
-    var mutation = (try beginExistingMutation()) orelse return null;
-    defer mutation.deinit();
-    var session = (try mutation.load(alloc)) orelse return null;
-    defer session.deinit(alloc);
-    if (session.expired(now_ms)) {
-        var token = try xai_oauth.refreshToken(alloc, transport, session.refresh_token);
-        defer token.deinit(alloc);
-        var refreshed = try sessionFromTokenSet(alloc, &token, now_ms);
-        defer refreshed.deinit(alloc);
-        try mutation.save(alloc, refreshed);
-        return try alloc.dupe(u8, refreshed.access_token);
+
+    var refresh_token: ?[]u8 = null;
+    defer if (refresh_token) |value| secret.zeroAndFree(alloc, value);
+
+    {
+        var mutation = (try beginExistingMutation()) orelse return null;
+        defer mutation.deinit();
+        var session = (try mutation.load(alloc)) orelse return null;
+        defer session.deinit(alloc);
+        if (!session.expired(now_ms)) {
+            return try alloc.dupe(u8, session.access_token);
+        }
+        refresh_token = try alloc.dupe(u8, session.refresh_token);
     }
-    return try alloc.dupe(u8, session.access_token);
+
+    var token = xai_oauth.refreshToken(alloc, transport, refresh_token.?) catch |err| {
+        if (isUnrecoverableRefreshError(err)) {
+            _ = deleteSession() catch {};
+        }
+        return err;
+    };
+    defer token.deinit(alloc);
+
+    var refreshed = try sessionFromTokenSet(alloc, &token, io_mod.milliTimestamp());
+    defer refreshed.deinit(alloc);
+
+    if (beginExistingMutation()) |maybe_mutation| {
+        if (maybe_mutation) |*mutation| {
+            defer mutation.deinit();
+            if (try mutation.load(alloc)) |*current| {
+                defer current.deinit(alloc);
+                if (!current.expired(io_mod.milliTimestamp()) and
+                    current.expires_at_ms >= refreshed.expires_at_ms)
+                {
+                    return try alloc.dupe(u8, current.access_token);
+                }
+            }
+            try mutation.save(alloc, refreshed);
+        } else {
+            try saveNewSession(alloc, refreshed);
+        }
+    } else |_| {}
+
+    return try alloc.dupe(u8, refreshed.access_token);
 }
 
 const NativeMutation = struct {
@@ -323,6 +363,17 @@ test "xAI session rejects another provider" {
         error.InvalidAuthSession,
         parse(std.testing.allocator, "{\"version\":1,\"provider\":\"vercel\",\"issuer\":\"https://auth.x.ai\",\"client_id\":\"c\",\"access_token\":\"a\",\"refresh_token\":\"r\",\"expires_at_ms\":1,\"scope\":\"s\",\"token_type\":\"Bearer\"}"),
     );
+}
+
+test "xAI rejected refresh errors discard the persisted session" {
+    try std.testing.expect(isUnrecoverableRefreshError(error.AccessDenied));
+    try std.testing.expect(isUnrecoverableRefreshError(error.ExpiredToken));
+    try std.testing.expect(isUnrecoverableRefreshError(error.InvalidClient));
+    try std.testing.expect(isUnrecoverableRefreshError(error.InvalidOAuthResponse));
+    try std.testing.expect(isUnrecoverableRefreshError(error.OAuthRequestFailed));
+    try std.testing.expect(isUnrecoverableRefreshError(error.NoRefreshToken));
+    try std.testing.expect(!isUnrecoverableRefreshError(error.HomeNotSet));
+    try std.testing.expect(!isUnrecoverableRefreshError(error.LockBusy));
 }
 
 test "xAI session expires with refresh skew" {

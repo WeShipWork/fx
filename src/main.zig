@@ -81,6 +81,8 @@ const types = @import("core/shared/types.zig");
 const image_attachments = @import("core/images/image_attachments.zig");
 const xai = @import("core/llm/xai.zig");
 const xai_session = @import("core/llm/xai_session.zig");
+const codex = @import("core/llm/codex.zig");
+const codex_session = @import("core/llm/codex_session.zig");
 const permissions = @import("core/permissions/permissions.zig");
 const sandbox = @import("core/permissions/sandbox.zig");
 const command_admission = @import("core/permissions/command_admission.zig");
@@ -1255,6 +1257,13 @@ const App = struct {
 
         const api_key_copy, const gateway_team_copy, const credential_source = if (xai.isXaiModel(self.selected_model.items)) blk: {
             const token = (try xai_session.loadValidAccessToken(
+                std.heap.c_allocator,
+                self.auth.oauthTransport(),
+                io_mod.milliTimestamp(),
+            )) orelse return error.MissingApiKey;
+            break :blk .{ token, @as(?[]u8, null), @as(?types.CredentialSource, null) };
+        } else if (codex.isCodexModel(self.selected_model.items)) blk: {
+            const token = (try codex_session.loadValidAccessToken(
                 std.heap.c_allocator,
                 self.auth.oauthTransport(),
                 io_mod.milliTimestamp(),
@@ -3790,6 +3799,15 @@ test {
     _ = @import("core/llm/xai_login.zig");
     _ = @import("core/llm/openai_completions.zig");
     _ = @import("core/llm/xai_provider.zig");
+    _ = @import("core/llm/codex.zig");
+    _ = @import("core/llm/codex_catalog.zig");
+    _ = @import("core/llm/codex_oauth.zig");
+    _ = @import("core/llm/codex_session.zig");
+    _ = @import("core/llm/codex_login.zig");
+    _ = @import("core/llm/native_auth.zig");
+    _ = @import("core/llm/openai_responses.zig");
+    _ = @import("core/llm/sse_lines.zig");
+    _ = @import("core/llm/codex_provider.zig");
     _ = @import("core/workspace/file_index.zig");
     _ = @import("core/gateway/gateway_json.zig");
     _ = @import("core/github/git_context.zig");

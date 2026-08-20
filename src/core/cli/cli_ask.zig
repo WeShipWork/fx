@@ -85,6 +85,9 @@ const ask_presentation = @import("../../ui/ask_presentation.zig");
 const url_opener = @import("../hosts/url_opener.zig");
 const xai = @import("../llm/xai.zig");
 const xai_session = @import("../llm/xai_session.zig");
+const codex = @import("../llm/codex.zig");
+const codex_session = @import("../llm/codex_session.zig");
+const native_auth = @import("../llm/native_auth.zig");
 
 const Allocator = std.mem.Allocator;
 const BackgroundRuntime = background_runtime.BackgroundRuntime;
@@ -507,6 +510,7 @@ const AskContext = struct {
     workspace_access: workspace_access.WorkspaceAccess = .{},
     api_key: []const u8 = "",
     owned_xai_token: ?[]u8 = null,
+    owned_codex_token: ?[]u8 = null,
     gateway_team: ?[]const u8 = null,
     credential_source: ?types.CredentialSource = null,
     model_catalog_access: credentials.CatalogAccess = .{ .public_only = .no_credential },
@@ -733,6 +737,7 @@ const AskContext = struct {
         if (self.subagent_skills_prompt.len > 0) self.alloc.free(self.subagent_skills_prompt);
         if (self.subagent_explicit_skills_prompt.len > 0) self.alloc.free(self.subagent_explicit_skills_prompt);
         if (self.owned_xai_token) |token| secret.zeroAndFree(self.alloc, token);
+        if (self.owned_codex_token) |token| secret.zeroAndFree(self.alloc, token);
     }
 
     fn lifecycleContext(self: *AskContext) agent_runtime.LifecycleContext {
@@ -1355,7 +1360,16 @@ fn missingCredentialResult(alloc: Allocator, options: RunOptions) !PromptRunResu
 }
 
 fn missingXaiCredentialResult(alloc: Allocator, options: RunOptions) !PromptRunResult {
-    try options.deps.write_stderr(options.deps.stderr_ctx, "fx ask: Fx needs an xAI session. Run fx login xai to sign in with SuperGrok or X Premium.\n");
+    try options.deps.write_stderr(options.deps.stderr_ctx, "fx ask: " ++ native_auth.missing_xai_session_message ++ "\n");
+    return .{
+        .exit_code = 1,
+        .assistant_output = try alloc.dupe(u8, ""),
+        .error_code = "MissingCredentials",
+    };
+}
+
+fn missingCodexCredentialResult(alloc: Allocator, options: RunOptions) !PromptRunResult {
+    try options.deps.write_stderr(options.deps.stderr_ctx, "fx ask: " ++ native_auth.missing_codex_session_message ++ "\n");
     return .{
         .exit_code = 1,
         .assistant_output = try alloc.dupe(u8, ""),
@@ -1408,7 +1422,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
     );
     try checkHeadlessCancellation(options.deps);
 
-    if (!options.continue_recovery and startup.credential == null and !xai.isXaiModel(startup.selected_model)) {
+    if (!options.continue_recovery and startup.credential == null and !native_auth.isNativeSubscriptionModel(startup.selected_model)) {
         return missingCredentialResult(alloc, options);
     }
 
@@ -1496,6 +1510,14 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
             io_mod.milliTimestamp(),
         )) orelse return missingXaiCredentialResult(alloc, options);
         ctx.owned_xai_token = token;
+        break :blk token;
+    } else if (codex.isCodexModel(ctx.model)) blk: {
+        const token = (try codex_session.loadValidAccessToken(
+            alloc,
+            cfg.gateway_provider.oauth_transport,
+            io_mod.milliTimestamp(),
+        )) orelse return missingCodexCredentialResult(alloc, options);
+        ctx.owned_codex_token = token;
         break :blk token;
     } else blk: {
         const credential = startup.credential orelse

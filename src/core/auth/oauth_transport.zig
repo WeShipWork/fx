@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 pub const Method = enum {
     get,
     post_form,
+    post_json,
 };
 
 pub const Request = struct {
@@ -23,6 +24,9 @@ pub const Disposition = enum {
 
 pub const Response = struct {
     disposition: Disposition,
+    /// HTTP status from the provider. Login flows that treat 403/404 as pending
+    /// need the numeric status, not just accepted/rejected.
+    status: u16 = 200,
     /// Owned bytes allocated with the allocator passed to `Provider.execute`.
     body: []u8,
 

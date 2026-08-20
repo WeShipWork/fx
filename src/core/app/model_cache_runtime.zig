@@ -4,6 +4,7 @@ const secret = @import("../auth/secret.zig");
 const collections = @import("../shared/collections.zig");
 const model_catalog = @import("../gateway/model_catalog.zig");
 const model_catalog_metadata = @import("../gateway/model_catalog_metadata.zig");
+const codex_catalog = @import("../llm/codex_catalog.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
@@ -97,6 +98,7 @@ pub const ModelProviderFilter = enum {
     all,
     anthropic,
     openai,
+    codex,
     xai,
     zai,
     others,
@@ -244,6 +246,8 @@ fn modelMenuItemMatches(
 fn providerMatchesFilter(provider: []const u8, filter: ModelProviderFilter) bool {
     const known_filter: ?ModelProviderFilter = if (std.ascii.eqlIgnoreCase(provider, "anthropic"))
         .anthropic
+    else if (std.ascii.eqlIgnoreCase(provider, "openai-codex"))
+        .codex
     else if (std.ascii.eqlIgnoreCase(provider, "openai"))
         .openai
     else if (std.ascii.eqlIgnoreCase(provider, "xai"))
@@ -254,7 +258,7 @@ fn providerMatchesFilter(provider: []const u8, filter: ModelProviderFilter) bool
         null;
     return switch (filter) {
         .all => true,
-        .anthropic, .openai, .xai, .zai => known_filter == filter,
+        .anthropic, .openai, .codex, .xai, .zai => known_filter == filter,
         .others => known_filter == null,
     };
 }
@@ -334,6 +338,16 @@ pub const Runtime = struct {
         var loaded = switch (result) {
             .loaded => |loaded| loaded,
             .failed => |failure| {
+                if (takeNativeCatalog(self.alloc)) |native| {
+                    self.mutex.lockUncancelable(io_mod.getIo());
+                    model_catalog.freeModelCatalog(self.alloc, &self.catalog);
+                    self.catalog = native;
+                    self.outcome = .{};
+                    self.state = .ready;
+                    self.completion_pending = true;
+                    self.mutex.unlock(io_mod.getIo());
+                    return;
+                }
                 self.markFailed(failure);
                 self.mutex.lockUncancelable(io_mod.getIo());
                 self.completion_pending = true;
@@ -341,6 +355,7 @@ pub const Runtime = struct {
                 return;
             },
         };
+        mergeNativeCatalog(self.alloc, &loaded.catalog);
 
         self.mutex.lockUncancelable(io_mod.getIo());
         if (loaded.catalog.items.len == 0 and self.outcome.loaded != null and self.catalog.items.len > 0) {
@@ -597,10 +612,20 @@ pub const Runtime = struct {
         var loaded = switch (result) {
             .loaded => |loaded| loaded,
             .failed => |failure| {
+                if (takeNativeCatalog(self.alloc)) |native| {
+                    self.mutex.lockUncancelable(io_mod.getIo());
+                    model_catalog.freeModelCatalog(self.alloc, &self.catalog);
+                    self.catalog = native;
+                    self.outcome = .{};
+                    self.state = .ready;
+                    self.mutex.unlock(io_mod.getIo());
+                    return;
+                }
                 self.markFailed(failure);
                 return;
             },
         };
+        mergeNativeCatalog(self.alloc, &loaded.catalog);
 
         self.mutex.lockUncancelable(io_mod.getIo());
         if (loaded.catalog.items.len == 0 and self.outcome.loaded != null and self.catalog.items.len > 0) {
@@ -695,6 +720,21 @@ fn modelMenuCatalogState(outcome: CatalogOutcome) ModelMenuCatalogState {
             .retryable = failed.retryable,
         } else null,
     };
+}
+
+fn mergeNativeCatalog(alloc: Allocator, catalog: *std.ArrayList(model_catalog.ModelCatalogEntry)) void {
+    codex_catalog.appendEntries(alloc, catalog) catch return;
+    std.mem.sort(model_catalog.ModelCatalogEntry, catalog.items, {}, model_catalog.compareModelCatalogEntries);
+}
+
+fn takeNativeCatalog(alloc: Allocator) ?std.ArrayList(model_catalog.ModelCatalogEntry) {
+    var catalog: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty;
+    mergeNativeCatalog(alloc, &catalog);
+    if (catalog.items.len == 0) {
+        catalog.deinit(alloc);
+        return null;
+    }
+    return catalog;
 }
 
 fn hydrateMenuSnapshot(
@@ -1320,6 +1360,26 @@ test "model menu owns resolved catalog state and filters without changing catalo
     const selected = (try runtime.menu.selectedModelAlloc(alloc)).?;
     defer alloc.free(selected);
     try std.testing.expectEqualStrings("standalone", selected);
+}
+
+test "model menu Codex tab isolates openai-codex models" {
+    const alloc = std.testing.allocator;
+    var entries: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty;
+    defer model_catalog.freeModelCatalog(alloc, &entries);
+    try entries.append(alloc, .{
+        .id = try alloc.dupe(u8, "openai/gpt-5.4"),
+        .model_type = try alloc.dupe(u8, "language"),
+    });
+    mergeNativeCatalog(alloc, &entries);
+
+    var menu = ModelMenu{};
+    defer menu.deinit(alloc);
+    menu.active = true;
+    try hydrateMenuSnapshot(alloc, &menu, entries.items);
+    menu.provider_index = @intFromEnum(ModelProviderFilter.codex);
+    try std.testing.expect(menu.filteredItemCount() >= 1);
+    try std.testing.expect(std.mem.startsWith(u8, menu.itemAt(0).?.id, "openai-codex/"));
+    try std.testing.expectEqualStrings("openai-codex", menu.itemAt(0).?.provider);
 }
 
 test "model menu snapshot construction cleans every allocation failure" {

@@ -29,6 +29,7 @@ const gateway_schema = @import("../core/tooling/gateway_schema.zig");
 const tool_advertisement = @import("../core/tooling/tool_advertisement.zig");
 const tool_dispatch = @import("../core/tooling/tool_dispatch.zig");
 const sort_utils = @import("../core/shared/sort_utils.zig");
+const codex_provider = @import("../core/llm/codex_provider.zig");
 const xai_provider = @import("../core/llm/xai_provider.zig");
 
 const Allocator = std.mem.Allocator;
@@ -129,7 +130,7 @@ const gateway_agent_stream_provider = agent_stream_provider_contract.Provider{
     .stream_fn = streamAgentCompletion,
 };
 
-pub const agent_stream_provider = xai_provider.wrap(gateway_agent_stream_provider);
+pub const agent_stream_provider = codex_provider.wrap(xai_provider.wrap(gateway_agent_stream_provider));
 
 pub const provider = gateway_provider.Provider{
     .agent_stream = agent_stream_provider,
@@ -612,14 +613,15 @@ const OAuthHttpOperation = struct {
             .location = .{ .url = self.request.url },
             .method = switch (self.request.method) {
                 .get => .GET,
-                .post_form => .POST,
+                .post_form, .post_json => .POST,
             },
             .payload = self.request.payload,
             .headers = .{
-                .content_type = if (self.request.method == .post_form)
-                    .{ .override = "application/x-www-form-urlencoded" }
-                else
-                    .default,
+                .content_type = switch (self.request.method) {
+                    .post_form => .{ .override = "application/x-www-form-urlencoded" },
+                    .post_json => .{ .override = "application/json" },
+                    .get => .default,
+                },
                 .user_agent = .{ .override = gateway_client.user_agent },
                 .accept_encoding = .omit,
             },
@@ -633,6 +635,7 @@ const OAuthHttpOperation = struct {
 
         return .{
             .disposition = if (result.status == .ok) .accepted else .rejected,
+            .status = @intFromEnum(result.status),
             .body = try self.alloc.dupe(u8, body),
         };
     }

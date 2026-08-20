@@ -437,7 +437,7 @@ test "model menu keeps active provider visible and omits unknown metadata" {
         .active = true,
         .load_state = .ready,
         .items = &items,
-        .provider_index = 5,
+        .provider_index = @intFromEnum(model_cache_runtime.ModelProviderFilter.others),
     };
 
     const rows = menuRowCount(projection, 42, 5);

@@ -5,6 +5,9 @@ const collections = @import("../shared/collections.zig");
 const model_catalog = @import("../gateway/model_catalog.zig");
 const model_catalog_metadata = @import("../gateway/model_catalog_metadata.zig");
 const codex_catalog = @import("../llm/codex_catalog.zig");
+const codex = @import("../llm/codex.zig");
+const codex_session = @import("../llm/codex_session.zig");
+const profile_paths = @import("../shared/profile_paths.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
@@ -338,15 +341,17 @@ pub const Runtime = struct {
         var loaded = switch (result) {
             .loaded => |loaded| loaded,
             .failed => |failure| {
-                if (takeNativeCatalog(self.alloc)) |native| {
-                    self.mutex.lockUncancelable(io_mod.getIo());
-                    model_catalog.freeModelCatalog(self.alloc, &self.catalog);
-                    self.catalog = native;
-                    self.outcome = .{};
-                    self.state = .ready;
-                    self.completion_pending = true;
-                    self.mutex.unlock(io_mod.getIo());
-                    return;
+                if (nativeCodexSessionAvailable(self.alloc)) {
+                    if (takeNativeCatalog(self.alloc)) |native| {
+                        self.mutex.lockUncancelable(io_mod.getIo());
+                        model_catalog.freeModelCatalog(self.alloc, &self.catalog);
+                        self.catalog = native;
+                        self.outcome = .{};
+                        self.state = .ready;
+                        self.completion_pending = true;
+                        self.mutex.unlock(io_mod.getIo());
+                        return;
+                    }
                 }
                 self.markFailed(failure);
                 self.mutex.lockUncancelable(io_mod.getIo());
@@ -355,7 +360,7 @@ pub const Runtime = struct {
                 return;
             },
         };
-        mergeNativeCatalog(self.alloc, &loaded.catalog);
+        if (nativeCodexSessionAvailable(self.alloc)) mergeNativeCatalog(self.alloc, &loaded.catalog);
 
         self.mutex.lockUncancelable(io_mod.getIo());
         if (loaded.catalog.items.len == 0 and self.outcome.loaded != null and self.catalog.items.len > 0) {
@@ -612,20 +617,22 @@ pub const Runtime = struct {
         var loaded = switch (result) {
             .loaded => |loaded| loaded,
             .failed => |failure| {
-                if (takeNativeCatalog(self.alloc)) |native| {
-                    self.mutex.lockUncancelable(io_mod.getIo());
-                    model_catalog.freeModelCatalog(self.alloc, &self.catalog);
-                    self.catalog = native;
-                    self.outcome = .{};
-                    self.state = .ready;
-                    self.mutex.unlock(io_mod.getIo());
-                    return;
+                if (nativeCodexSessionAvailable(self.alloc)) {
+                    if (takeNativeCatalog(self.alloc)) |native| {
+                        self.mutex.lockUncancelable(io_mod.getIo());
+                        model_catalog.freeModelCatalog(self.alloc, &self.catalog);
+                        self.catalog = native;
+                        self.outcome = .{};
+                        self.state = .ready;
+                        self.mutex.unlock(io_mod.getIo());
+                        return;
+                    }
                 }
                 self.markFailed(failure);
                 return;
             },
         };
-        mergeNativeCatalog(self.alloc, &loaded.catalog);
+        if (nativeCodexSessionAvailable(self.alloc)) mergeNativeCatalog(self.alloc, &loaded.catalog);
 
         self.mutex.lockUncancelable(io_mod.getIo());
         if (loaded.catalog.items.len == 0 and self.outcome.loaded != null and self.catalog.items.len > 0) {
@@ -727,6 +734,13 @@ fn mergeNativeCatalog(alloc: Allocator, catalog: *std.ArrayList(model_catalog.Mo
     std.mem.sort(model_catalog.ModelCatalogEntry, catalog.items, {}, model_catalog.compareModelCatalogEntries);
 }
 
+/// Native Codex models join a gateway catalog only while a Codex session is
+/// signed in; anonymous and gateway-only users see exactly what the gateway
+/// returned.
+fn nativeCodexSessionAvailable(alloc: Allocator) bool {
+    return codex_session.hasPersistedSession(alloc);
+}
+
 fn takeNativeCatalog(alloc: Allocator) ?std.ArrayList(model_catalog.ModelCatalogEntry) {
     var catalog: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty;
     mergeNativeCatalog(alloc, &catalog);
@@ -803,6 +817,10 @@ const TestEnv = struct {
     map: std.process.Environ.Map,
 
     fn install(alloc: Allocator, models_url: []const u8) !*TestEnv {
+        return installWithHome(alloc, models_url, null);
+    }
+
+    fn installWithHome(alloc: Allocator, models_url: []const u8, home: ?[]const u8) !*TestEnv {
         _ = try stableEmptyTestEnviron();
 
         const self = try alloc.create(TestEnv);
@@ -813,6 +831,7 @@ const TestEnv = struct {
         };
         errdefer self.map.deinit();
         try self.map.put(e2e_gateway_models_url_env, models_url);
+        if (home) |value| try self.map.put("HOME", value);
         io_mod.setEnvironMap(&self.map);
         return self;
     }
@@ -1287,6 +1306,61 @@ test "model cache warmup publishes a snapshot and filtered completion" {
     try std.testing.expect(runtime.catalogModelCompletion("private/blue") == null);
 
     try std.testing.expectEqualStrings("team_123", fixture.capturedHeaderValue(test_gateway_client.vercel_ai_gateway_team_header).?);
+    if (fixture.failure()) |err| return err;
+}
+
+test "model cache merges native codex models only with a persisted session" {
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.fx");
+    const session_text = try std.fmt.allocPrint(
+        alloc,
+        "{{\"version\":1,\"provider\":\"{s}\",\"issuer\":\"{s}\",\"client_id\":\"client\",\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"expires_at_ms\":4102444800000,\"scope\":\"scope\",\"token_type\":\"Bearer\",\"account_id\":\"acct\"}}",
+        .{ codex.provider_id, codex.issuer },
+    );
+    defer alloc.free(session_text);
+    {
+        const session_path = try std.fmt.allocPrint(
+            alloc,
+            "home/.fx/{s}",
+            .{profile_paths.codex_auth_file_name},
+        );
+        defer alloc.free(session_path);
+        var file = try tmp.dir.createFile(std.testing.io, session_path, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, session_text);
+    }
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+
+    var fixture = try test_gateway_client.TestModelCatalogFixture.initPrivate();
+    defer fixture.deinit();
+    try fixture.start();
+    try std.testing.expect(fixture.waitForAcceptStart(5000));
+
+    const models_url = try std.fmt.allocPrint(
+        alloc,
+        "http://127.0.0.1:{d}/v1/models",
+        .{fixture.port()},
+    );
+    defer alloc.free(models_url);
+    const env = try TestEnv.installWithHome(alloc, models_url, home);
+    defer env.deinit();
+
+    var runtime = Runtime.init(alloc, "/v1/models");
+    defer runtime.deinit();
+    runtime.startWarmup(
+        test_builtin_gateway.model_catalog_provider,
+        authenticatedCatalogAccess("test-key", "team_123"),
+    );
+    try waitForWarmup(&runtime);
+
+    var snapshot = (try runtime.snapshotCachedModelIds(alloc)).?;
+    defer collections.freeStringList(alloc, &snapshot);
+    try std.testing.expect(modelIdListContains(snapshot.items, "private/blue-hornbill"));
+    try std.testing.expect(modelIdListContains(snapshot.items, "openai-codex/gpt-5.4"));
     if (fixture.failure()) |err| return err;
 }
 

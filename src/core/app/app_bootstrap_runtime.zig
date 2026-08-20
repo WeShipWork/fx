@@ -18,6 +18,8 @@ const sandbox = @import("../permissions/sandbox.zig");
 const skill_contract = @import("../skills/skill_contract.zig");
 const skill_runtime = @import("../skills/skill_runtime.zig");
 const types = @import("../shared/types.zig");
+const xai = @import("../llm/xai.zig");
+const xai_session = @import("../llm/xai_session.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const auto_upgrade = @import("../upgrade/auto_upgrade.zig");
 const update_target = @import("../upgrade/update_target.zig");
@@ -215,11 +217,6 @@ pub fn Runtime(comptime App: type) type {
                 startup.stored_key_status,
                 startup.credential_onboarding_skipped,
             );
-            const startup_auth_view = app.auth.view();
-            if (startup_auth_view.active_source == null and !startup_auth_view.onboarding_skipped) {
-                try app.auth.refreshSourceInventory(app.alloc);
-                app.auth.openOnboardingPicker(app.alloc);
-            }
             if (comptime @hasField(App, "terminal_input_runtime") and @hasField(App, "terminal")) {
                 // Own theme protocol bytes even under FX_THEME; probing stays gated.
                 app.terminal_input_runtime.terminal_theme_monitor.start();
@@ -254,6 +251,17 @@ pub fn Runtime(comptime App: type) type {
             const selected_model = startup.takeSelectedModel();
             defer if (selected_model.len > 0) app.alloc.free(selected_model);
             try app.selected_model.appendSlice(app.alloc, selected_model);
+            const startup_auth_view = app.auth.view();
+            if (startup_auth_view.active_source == null and !startup_auth_view.onboarding_skipped and
+                !xai.promptCredentialSatisfied(
+                    selected_model,
+                    false,
+                    xai_session.hasPersistedSession(app.alloc),
+                ))
+            {
+                try app.auth.refreshSourceInventory(app.alloc);
+                app.auth.openOnboardingPicker(app.alloc);
+            }
             try deps.configure_session_preferences(
                 app,
                 startup.configured_model,

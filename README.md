@@ -27,10 +27,16 @@ curl -fsSL https://fx.sh/setup.sh | bash
 
 ## Run fx
 
-To get started, sign in with Vercel:
+To get started, sign in with Vercel for AI Gateway:
 
 ```bash
 fx login
+```
+
+Or sign in with SuperGrok or X Premium for native `xai/grok-4.6`:
+
+```bash
+fx login xai
 ```
 
 Or add an AI Gateway API key:

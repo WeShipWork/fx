@@ -22,6 +22,8 @@ const permission_request = @import("../permissions/permission_request.zig");
 const sandbox = @import("../permissions/sandbox.zig");
 const skill_runtime = @import("../skills/skill_runtime.zig");
 const types = @import("../shared/types.zig");
+const xai = @import("../llm/xai.zig");
+const xai_session = @import("../llm/xai_session.zig");
 const subagent_domain = @import("../subagent/domain.zig");
 const subagent_projection = @import("../subagent/ui_projection.zig");
 const file_index = @import("../workspace/file_index.zig");
@@ -490,7 +492,11 @@ pub fn Runtime(comptime App: type) type {
                 .stream = visible_stream,
                 .completed_assistant_presentation_tail = app.pacer.hasCompletedAssistantPresentationTail(),
                 .writing_response = app.pacer.hasPending(),
-                .has_api_key = app.auth.credentialSource() != null,
+                .has_api_key = xai.promptCredentialSatisfied(
+                    visible_model,
+                    app.auth.credentialSource() != null,
+                    xai_session.hasPersistedSession(app.alloc),
+                ),
                 .model = visible_model,
                 .pending_images = app.pending_images.items,
                 .input_appearance = app.input_runtime.input_appearance,

@@ -7,6 +7,7 @@ const io_mod = @import("../shared/io.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const entity_spans = @import("../shared/entity_spans.zig");
 const types = @import("../shared/types.zig");
+const xai = @import("../llm/xai.zig");
 const input_queue_runtime = @import("input_queue_runtime.zig");
 const input_completion_runtime = @import("input_completion_runtime.zig");
 const input_limit_feedback = @import("input_limit_feedback.zig");
@@ -290,7 +291,9 @@ pub fn SubmitRuntime(comptime App: type) type {
 
             var command_end: usize = 1;
             while (command_end < submission.len and !std.ascii.isWhitespace(submission[command_end])) : (command_end += 1) {}
-            return std.mem.trim(u8, submission[command_end..], " \t\r\n").len > 0;
+            const payload = std.mem.trim(u8, submission[command_end..], " \t\r\n");
+            if (payload.len == 0) return false;
+            return !xai.isXaiModel(payload);
         }
 
         fn pendingImagesPrefixEnd(

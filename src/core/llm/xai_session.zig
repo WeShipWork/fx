@@ -232,7 +232,7 @@ fn invalidateRejectedSession(alloc: Allocator, rejected_refresh: []const u8) !vo
         else => return err,
     };
     defer fx_dir.close(io_mod.getIo());
-    try deleteMatchingRefresh(&fx_dir, alloc, rejected_refresh);
+    try invalidateMatchingRefreshInPlace(&fx_dir, alloc, rejected_refresh);
 }
 
 fn deleteMatchingRefresh(fx_dir: *std.Io.Dir, alloc: Allocator, rejected_refresh: []const u8) !void {
@@ -243,6 +243,36 @@ fn deleteMatchingRefresh(fx_dir: *std.Io.Dir, alloc: Allocator, rejected_refresh
         error.FileNotFound => {},
         else => return err,
     };
+}
+
+fn invalidateMatchingRefreshInPlace(fx_dir: *std.Io.Dir, alloc: Allocator, rejected_refresh: []const u8) !void {
+    var file = fx_dir.openFile(io_mod.getIo(), auth_file_name, .{
+        .mode = .read_write,
+        .allow_directory = false,
+        .follow_symlinks = false,
+        .resolve_beneath = true,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer file.close(io_mod.getIo());
+    try invalidateOpenFileIfRefreshMatches(&file, alloc, rejected_refresh);
+}
+
+fn invalidateOpenFileIfRefreshMatches(
+    file: *std.Io.File,
+    alloc: Allocator,
+    rejected_refresh: []const u8,
+) !void {
+    const bytes = io_mod.readFileToEnd(alloc, file, max_auth_file_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return,
+    };
+    defer secret.zeroAndFree(alloc, bytes);
+    var session = parse(alloc, bytes) catch return;
+    defer session.deinit(alloc);
+    if (!std.mem.eql(u8, session.refresh_token, rejected_refresh)) return;
+    try file.setLength(io_mod.getIo(), 0);
 }
 
 const NativeMutation = struct {
@@ -425,6 +455,60 @@ test "xAI rejected refresh deletes only the matching session file" {
 
     try deleteMatchingRefresh(&tmp.dir, std.testing.allocator, "dead-refresh");
     try std.testing.expect((try loadFromDir(std.testing.allocator, &tmp.dir)) == null);
+}
+
+test "xAI unlocked invalidation keeps a replaced session" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var rejected = Session{
+        .issuer = try std.testing.allocator.dupe(u8, xai.issuer),
+        .client_id = try std.testing.allocator.dupe(u8, xai.client_id),
+        .access_token = try std.testing.allocator.dupe(u8, "old-access"),
+        .refresh_token = try std.testing.allocator.dupe(u8, "dead-refresh"),
+        .expires_at_ms = 1,
+        .scope = try std.testing.allocator.dupe(u8, xai.scope),
+        .token_type = try std.testing.allocator.dupe(u8, "Bearer"),
+    };
+    defer rejected.deinit(std.testing.allocator);
+    const rejected_text = try stringify(std.testing.allocator, rejected);
+    defer secret.zeroAndFree(std.testing.allocator, rejected_text);
+    {
+        var file = try tmp.dir.createFile(std.testing.io, auth_file_name, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, rejected_text);
+    }
+
+    var opened = try tmp.dir.openFile(std.testing.io, auth_file_name, .{
+        .mode = .read_write,
+        .allow_directory = false,
+        .follow_symlinks = false,
+        .resolve_beneath = true,
+    });
+    defer opened.close(std.testing.io);
+
+    var replacement = Session{
+        .issuer = try std.testing.allocator.dupe(u8, xai.issuer),
+        .client_id = try std.testing.allocator.dupe(u8, xai.client_id),
+        .access_token = try std.testing.allocator.dupe(u8, "new-access"),
+        .refresh_token = try std.testing.allocator.dupe(u8, "live-refresh"),
+        .expires_at_ms = 9_999,
+        .scope = try std.testing.allocator.dupe(u8, xai.scope),
+        .token_type = try std.testing.allocator.dupe(u8, "Bearer"),
+    };
+    defer replacement.deinit(std.testing.allocator);
+    const replacement_text = try stringify(std.testing.allocator, replacement);
+    defer secret.zeroAndFree(std.testing.allocator, replacement_text);
+    {
+        var temp = try tmp.dir.createFile(std.testing.io, ".xai-auth.tmp", .{ .exclusive = true });
+        defer temp.close(std.testing.io);
+        try temp.writeStreamingAll(std.testing.io, replacement_text);
+    }
+    try tmp.dir.rename(".xai-auth.tmp", tmp.dir, auth_file_name, std.testing.io);
+
+    try invalidateOpenFileIfRefreshMatches(&opened, std.testing.allocator, "dead-refresh");
+    var kept = (try loadFromDir(std.testing.allocator, &tmp.dir)).?;
+    defer kept.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("live-refresh", kept.refresh_token);
 }
 
 test "xAI rejected refresh errors discard the persisted session" {

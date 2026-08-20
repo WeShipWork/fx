@@ -220,9 +220,11 @@ pub const StreamAccumulator = struct {
         errdefer if (content) |value| alloc.free(value);
         const tool_calls = try takeToolCalls(alloc, &self.tool_calls);
         errdefer types.freeToolCallSlice(alloc, tool_calls);
-        if (self.finish_reason == null) {
-            self.finish_reason = if (tool_calls.len > 0) .tool_calls else .stop;
-        } else if (self.finish_reason == .stop and tool_calls.len > 0) {
+        // Leave a missing finish reason null: the Responses API always emits a
+        // terminal response event on a healthy stream, so EOF without one means
+        // the stream was truncated. Downstream classification treats a null
+        // finish reason as an interrupted response instead of a successful turn.
+        if (self.finish_reason == .stop and tool_calls.len > 0) {
             self.finish_reason = .tool_calls;
         }
         const generation_id = self.generation_id;
@@ -642,4 +644,42 @@ test "responses SSE accepts an event larger than the HTTP transfer buffer" {
     const completion = try acc.takeCompletion(std.testing.allocator);
     defer if (completion.content) |content| std.testing.allocator.free(@constCast(content));
     try std.testing.expectEqual(@as(usize, 20 * 1024), completion.content.?.len);
+}
+
+test "responses SSE without a terminal event keeps finish reason null" {
+    var acc = StreamAccumulator{};
+    defer acc.deinit(std.testing.allocator);
+
+    try consumeSseData(
+        std.testing.allocator,
+        &acc,
+        "{\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}",
+        null,
+        null,
+        null,
+        null,
+        null,
+    );
+    try consumeSseData(
+        std.testing.allocator,
+        &acc,
+        "{\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}",
+        null,
+        null,
+        null,
+        null,
+        null,
+    );
+
+    const completion = try acc.takeCompletion(std.testing.allocator);
+    defer {
+        if (completion.content) |content| std.testing.allocator.free(@constCast(content));
+        if (completion.generation_id) |id| std.testing.allocator.free(@constCast(id));
+    }
+    try std.testing.expectEqualStrings("partial", completion.content.?);
+    try std.testing.expect(completion.finish_reason == null);
+    try std.testing.expectEqual(
+        types.ProviderCompletionDisposition.interrupted,
+        types.classifyProviderCompletion(completion),
+    );
 }

@@ -20,11 +20,22 @@ Contributions should preserve that direction:
 
 Requirements:
 
-* Zig `0.16.0+`
+* Zig `0.16.0`
+* Bun `1.3.14` for the TypeScript suites under `tests/`
+* tmux for the TUI end-to-end tests
+* hyperfine for the startup benchmarks
 
-* interactive terminal for manual shell testing
+A checked-in `mise.toml` pins these exact versions. With [mise](https://mise.jdx.dev/) installed, `mise install` (or just entering the repo with mise's shell hook active) provides the full toolchain:
+
+```bash
+mise install
+```
+
+* an interactive terminal for manual shell testing
 
 * a Vercel OAuth session via `fx login` for model-backed flows. macOS Keychain API keys (via `fx setup`), `AI_GATEWAY_API_KEY`, and `VERCEL_OIDC_TOKEN` are also supported
+
+On Linux hosts whose system toolchain was built by GCC 16 or newer, linking a native build against the system libc can fail with `unhandled relocation type R_X86_64_PC64` in `crt1.o`. Build against Zig's bundled glibc instead: `zig build -Dtarget=x86_64-linux-gnu.2.39` (or `aarch64-linux-gnu.2.39` on arm64).
 
 Common commands:
 

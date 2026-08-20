@@ -6,6 +6,7 @@ const app_lifecycle = @import("../app/app_lifecycle.zig");
 const app_runtime_setup = @import("../app/app_runtime_setup.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
+const secret = @import("../auth/secret.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
 const background_runtime = @import("../background/background_runtime.zig");
 const terminal_client_runtime = @import("../terminal/client.zig");
@@ -82,6 +83,8 @@ const types = @import("../shared/types.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const ask_presentation = @import("../../ui/ask_presentation.zig");
 const url_opener = @import("../hosts/url_opener.zig");
+const xai = @import("../llm/xai.zig");
+const xai_session = @import("../llm/xai_session.zig");
 
 const Allocator = std.mem.Allocator;
 const BackgroundRuntime = background_runtime.BackgroundRuntime;
@@ -453,6 +456,7 @@ const AskContext = struct {
     workspace_root: []const u8,
     workspace_access: workspace_access.WorkspaceAccess = .{},
     api_key: []const u8 = "",
+    owned_xai_token: ?[]u8 = null,
     gateway_team: ?[]const u8 = null,
     credential_source: ?types.CredentialSource = null,
     model_catalog_access: credentials.CatalogAccess = .{ .public_only = .no_credential },
@@ -678,6 +682,7 @@ const AskContext = struct {
         self.tool_call_records.deinit(self.alloc);
         if (self.subagent_skills_prompt.len > 0) self.alloc.free(self.subagent_skills_prompt);
         if (self.subagent_explicit_skills_prompt.len > 0) self.alloc.free(self.subagent_explicit_skills_prompt);
+        if (self.owned_xai_token) |token| secret.zeroAndFree(self.alloc, token);
     }
 
     fn lifecycleContext(self: *AskContext) agent_runtime.LifecycleContext {
@@ -1299,6 +1304,15 @@ fn missingCredentialResult(alloc: Allocator, options: RunOptions) !PromptRunResu
     };
 }
 
+fn missingXaiCredentialResult(alloc: Allocator, options: RunOptions) !PromptRunResult {
+    try options.deps.write_stderr(options.deps.stderr_ctx, "fx ask: Fx needs an xAI session. Run fx login xai to sign in with SuperGrok or X Premium.\n");
+    return .{
+        .exit_code = 1,
+        .assistant_output = try alloc.dupe(u8, ""),
+        .error_code = "MissingCredentials",
+    };
+}
+
 fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: ?PermissionMode, cfg: Config, options: RunOptions) !PromptRunResult {
     var owned_prompt = try alloc.dupe(u8, prompt);
     defer alloc.free(owned_prompt);
@@ -1344,7 +1358,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
     );
     try checkHeadlessCancellation(options.deps);
 
-    if (!options.continue_recovery and startup.credential == null) {
+    if (!options.continue_recovery and startup.credential == null and !xai.isXaiModel(startup.selected_model)) {
         return missingCredentialResult(alloc, options);
     }
 
@@ -1425,13 +1439,23 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         ctx.session.setConversationLanguageFromUserMessage(owned_prompt);
     }
 
-    const credential = startup.credential orelse
-        return missingCredentialResult(alloc, options);
-    const api_key = credential.token;
+    const api_key = if (xai.isXaiModel(ctx.model)) blk: {
+        const token = (try xai_session.loadValidAccessToken(
+            alloc,
+            cfg.gateway_provider.oauth_transport,
+            io_mod.milliTimestamp(),
+        )) orelse return missingXaiCredentialResult(alloc, options);
+        ctx.owned_xai_token = token;
+        break :blk token;
+    } else blk: {
+        const credential = startup.credential orelse
+            return missingCredentialResult(alloc, options);
+        ctx.gateway_team = credential.gatewayTeam();
+        ctx.credential_source = credential.source;
+        ctx.model_catalog_access = credentials.catalogAccessForCredential(credential.source, credential.token, credential.gatewayTeam());
+        break :blk credential.token;
+    };
     ctx.api_key = api_key;
-    ctx.gateway_team = credential.gatewayTeam();
-    ctx.credential_source = credential.source;
-    ctx.model_catalog_access = credentials.catalogAccessForCredential(credential.source, api_key, credential.gatewayTeam());
 
     const restored_image_catalog = try ctx.session.snapshotImageCatalog(alloc, &.{});
     defer types.freeImageAttachmentSlice(alloc, restored_image_catalog);
@@ -1553,8 +1577,8 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         .authorized_image_catalog = authorized_image_catalog,
         .model = @constCast(ctx.model),
         .api_key = api_key,
-        .gateway_team = if (credential.gatewayTeam()) |team| @constCast(team) else null,
-        .credential_source = credential.source,
+        .gateway_team = if (ctx.gateway_team) |team| @constCast(team) else null,
+        .credential_source = ctx.credential_source,
         .permission_mode = ctx.permission_mode,
         .sandbox_backend = ctx.sandbox_backend,
         .history = context_history,

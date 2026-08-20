@@ -8,6 +8,8 @@ const credentials = @import("../auth/credentials.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const types = @import("../shared/types.zig");
+const xai = @import("../llm/xai.zig");
+const xai_session = @import("../llm/xai_session.zig");
 
 fn oauthAuthEnabled(comptime App: type) bool {
     return runtime_profile.allows(App, .native_auth) or
@@ -16,15 +18,33 @@ fn oauthAuthEnabled(comptime App: type) bool {
 
 pub fn Runtime(comptime App: type) type {
     return struct {
+        fn xaiSessionCoversPrompt(app: *App) bool {
+            if (comptime !@hasField(App, "selected_model")) return false;
+            return xai.promptCredentialSatisfied(
+                app.selected_model.items,
+                app.auth.credentialSource() != null,
+                xai_session.hasPersistedSession(app.alloc),
+            );
+        }
+
         fn ensurePromptCredential(app: *App) !bool {
+            if (xaiSessionCoversPrompt(app)) return true;
             if (app.auth.credentialSource() != null) return true;
 
             const auth_view = app.auth.view();
-            if (auth_view.onboarding_skipped) {
+            const xai_model = if (comptime @hasField(App, "selected_model"))
+                xai.isXaiModel(app.selected_model.items)
+            else
+                false;
+            const missing_body = if (xai_model)
+                "Fx needs an xAI session. Run fx login xai to sign in with SuperGrok or X Premium."
+            else
+                credentials.missing_interactive_credential_message;
+            if (auth_view.onboarding_skipped or xai_model) {
                 try app.writeDomainNotice(.{
                     .topic = "auth",
                     .tone = .@"error",
-                    .body = credentials.missing_interactive_credential_message,
+                    .body = missing_body,
                 }, true);
             } else if (!app.auth.pickerView().active) {
                 try app.auth.refreshSourceInventory(app.alloc);
@@ -504,6 +524,7 @@ pub fn Runtime(comptime App: type) type {
         }
 
         pub fn admitPromptCredential(app: *App) !bool {
+            if (xaiSessionCoversPrompt(app)) return true;
             if (comptime !oauthAuthEnabled(App)) {
                 if (app.auth.apiKey() != null) return true;
                 try app.writeDomainNotice(.{

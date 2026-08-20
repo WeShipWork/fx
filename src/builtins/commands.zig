@@ -89,14 +89,18 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .login,
         .token = "login",
-        .usage = "login",
-        .summary = "Sign in with Vercel",
+        .usage = "login [xai]",
+        .summary = "Sign in with Vercel or xAI",
+        .details = &.{
+            "With no argument, sign in with Vercel for AI Gateway.",
+            "fx login xai starts SuperGrok or X Premium device-code sign-in.",
+        },
     },
     .{
         .kind = .logout,
         .token = "logout",
-        .usage = "logout",
-        .summary = "Sign out of the current Vercel session",
+        .usage = "logout [xai]",
+        .summary = "Sign out of Vercel or xAI",
     },
     .{
         .kind = .setup,
@@ -286,8 +290,8 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .kind = .replay, .usage = "replay <tape>" },
     } },
     .{ .entries = &.{
-        .{ .kind = .login, .usage = "login" },
-        .{ .kind = .logout, .usage = "logout" },
+        .{ .kind = .login, .usage = "login [xai]" },
+        .{ .kind = .logout, .usage = "logout [xai]" },
         .{ .kind = .setup, .usage = "setup" },
         .{ .kind = .teams, .usage = "teams" },
         .{ .kind = .credits, .usage = "credits|balance" },

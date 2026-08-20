@@ -85,6 +85,19 @@ fn localCapabilitiesForModel(model: []const u8) Capabilities {
     var capabilities: Capabilities = .{};
     if (std.mem.startsWith(u8, model, "anthropic/")) {
         capabilities.prompt_caching = true;
+    } else if (std.mem.eql(u8, model, "xai/grok-4.6") or std.mem.eql(u8, model, "grok-4.6")) {
+        const xai_efforts = [_]types.ReasoningEffort{
+            types.ReasoningEffort.literal("minimal"),
+            types.ReasoningEffort.literal("low"),
+            types.ReasoningEffort.literal("medium"),
+            types.ReasoningEffort.literal("high"),
+            types.ReasoningEffort.literal("xhigh"),
+        };
+        capabilities.parallel_tool_calls = true;
+        capabilities.supports_tool_use = true;
+        capabilities.supports_vision = true;
+        capabilities.supports_reasoning = true;
+        capabilities.reasoning_efforts = .fromSlice(&xai_efforts);
     } else if (std.mem.startsWith(u8, model, "xai/")) {
         capabilities.parallel_tool_calls = true;
     }
@@ -95,8 +108,10 @@ fn localCapabilitiesForModel(model: []const u8) Capabilities {
 pub fn resolveCapabilities(model: []const u8, gateway_metadata: ?GatewayMetadata) Capabilities {
     var capabilities = localCapabilitiesForModel(model);
     if (gateway_metadata) |metadata| {
-        capabilities.supports_reasoning = metadata.supports_reasoning or metadata.reasoning_efforts.len > 0;
-        capabilities.reasoning_efforts = metadata.reasoning_efforts;
+        if (metadata.reasoning_efforts.len > 0) {
+            capabilities.reasoning_efforts = metadata.reasoning_efforts;
+        }
+        capabilities.supports_reasoning = metadata.supports_reasoning or capabilities.reasoning_efforts.len > 0;
         capabilities.supports_fast_mode = metadata.supports_fast_mode;
         capabilities.supports_tool_use = metadata.supports_tool_use;
         capabilities.supports_vision = metadata.supports_vision;
@@ -176,6 +191,7 @@ fn localContextWindowSize(model: []const u8) ?u32 {
             return 200_000;
         return 128_000;
     }
+    if (std.mem.eql(u8, model, "xai/grok-4.6") or std.mem.eql(u8, model, "grok-4.6")) return 500_000;
     if (std.mem.startsWith(u8, model, "xai/")) return 131_072;
     if (std.mem.startsWith(u8, model, "google/")) return 1_000_000;
     return null;
@@ -217,6 +233,15 @@ test "capabilities never infer reasoning or Fast controls from model IDs" {
         try std.testing.expectEqual(@as(usize, 0), capabilities.reasoning_efforts.len);
         try std.testing.expect(!capabilities.supports_fast_mode);
     }
+}
+
+test "native grok-4.6 advertises xAI reasoning efforts" {
+    const capabilities = capabilitiesForModel("xai/grok-4.6");
+    try std.testing.expect(capabilities.supports_reasoning);
+    try std.testing.expectEqual(@as(usize, 5), capabilities.reasoning_efforts.len);
+    try std.testing.expectEqualStrings("minimal", capabilities.reasoning_efforts.values[0].label());
+    try std.testing.expectEqualStrings("xhigh", capabilities.reasoning_efforts.values[4].label());
+    try std.testing.expect(reasoningEffortSupported(capabilities, types.ReasoningEffort.literal("high")));
 }
 
 test "resolveCapabilities preserves Gateway controls and unrelated local policy" {

@@ -22,6 +22,7 @@ const github_workflows = @import("../github/github_workflows.zig");
 const host = @import("../hosts/host.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
+const xai_login = @import("../llm/xai_login.zig");
 const secret = @import("../auth/secret.zig");
 const output_contracts = @import("../output/output_contracts.zig");
 const permission_auto_classifier = @import("../permissions/auto_classifier.zig");
@@ -723,8 +724,24 @@ fn runNonInteractiveWithDeps(
         .pr => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .pull_request),
         .issue => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .issue),
         .login => |rest| {
+            if (rest.len == 1 and std.mem.eql(u8, rest[0], "xai")) {
+                xai_login.runLogin(
+                    alloc,
+                    cfg.gateway_provider.oauth_transport,
+                    cfg.url_opener,
+                ) catch |err| {
+                    const message = switch (err) {
+                        error.AccessDenied => "fx login xai: authorization denied\n",
+                        error.ExpiredToken, error.LoginTimedOut => "fx login xai: authorization expired; run fx login xai again\n",
+                        else => "fx login xai: failed to sign in\n",
+                    };
+                    try writeStderr(deps, message);
+                    return .handled_failure;
+                };
+                return .handled_success;
+            }
             if (rest.len != 0) {
-                try writeStderr(deps, "usage: fx login\n");
+                try writeStderr(deps, "usage: fx login [xai]\n");
                 return .handled_failure;
             }
             login_flow.runLogin(
@@ -744,8 +761,19 @@ fn runNonInteractiveWithDeps(
             return .handled_success;
         },
         .logout => |rest| {
+            if (rest.len == 1 and std.mem.eql(u8, rest[0], "xai")) {
+                const outcome = xai_login.logout() catch {
+                    try writeStderr(deps, "fx logout xai: failed to remove the xAI session\n");
+                    return .handled_failure;
+                };
+                try writeStdout(
+                    deps,
+                    if (outcome == .missing) "No xAI session found.\n" else "Signed out of xAI.\n",
+                );
+                return .handled_success;
+            }
             if (rest.len != 0) {
-                try writeStderr(deps, "usage: fx logout\n");
+                try writeStderr(deps, "usage: fx logout [xai]\n");
                 return .handled_failure;
             }
             const result = login_flow.logout(alloc, cfg.gateway_provider.oauth_transport) catch |err| switch (err) {

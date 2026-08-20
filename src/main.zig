@@ -78,6 +78,8 @@ const subagent_domain = @import("core/subagent/domain.zig");
 const subagent_execution = @import("core/subagent/execution.zig");
 const types = @import("core/shared/types.zig");
 const image_attachments = @import("core/images/image_attachments.zig");
+const xai = @import("core/llm/xai.zig");
+const xai_session = @import("core/llm/xai_session.zig");
 const permissions = @import("core/permissions/permissions.zig");
 const sandbox = @import("core/permissions/sandbox.zig");
 const command_admission = @import("core/permissions/command_admission.zig");
@@ -1246,14 +1248,24 @@ const App = struct {
         const model_copy = try std.heap.c_allocator.dupe(u8, self.selected_model.items);
         errdefer std.heap.c_allocator.free(model_copy);
 
-        const gateway_credential = self.auth.gatewayCredential() orelse return error.MissingApiKey;
-        const api_key_copy = try std.heap.c_allocator.dupe(u8, gateway_credential.api_key);
+        const api_key_copy, const gateway_team_copy, const credential_source = if (xai.isXaiModel(self.selected_model.items)) blk: {
+            const token = (try xai_session.loadValidAccessToken(
+                std.heap.c_allocator,
+                self.auth.oauthTransport(),
+                io_mod.milliTimestamp(),
+            )) orelse return error.MissingApiKey;
+            break :blk .{ token, @as(?[]u8, null), @as(?types.CredentialSource, null) };
+        } else blk: {
+            const gateway_credential = self.auth.gatewayCredential() orelse return error.MissingApiKey;
+            const api_key_copy = try std.heap.c_allocator.dupe(u8, gateway_credential.api_key);
+            errdefer secret.zeroAndFree(std.heap.c_allocator, api_key_copy);
+            const gateway_team_copy = if (gateway_credential.gateway_team) |team|
+                try std.heap.c_allocator.dupe(u8, team)
+            else
+                null;
+            break :blk .{ api_key_copy, gateway_team_copy, gateway_credential.source };
+        };
         errdefer secret.zeroAndFree(std.heap.c_allocator, api_key_copy);
-
-        const gateway_team_copy = if (gateway_credential.gateway_team) |team|
-            try std.heap.c_allocator.dupe(u8, team)
-        else
-            null;
         errdefer if (gateway_team_copy) |team| std.heap.c_allocator.free(team);
 
         const authorized_image_catalog = try self.session.snapshotImageCatalog(
@@ -1326,7 +1338,7 @@ const App = struct {
             .model = model_copy,
             .api_key = api_key_copy,
             .gateway_team = gateway_team_copy,
-            .credential_source = gateway_credential.source,
+            .credential_source = credential_source,
             .permission_mode = self.permission_engine.mode,
             .sandbox_backend = sandbox.effectiveBackend(
                 self.permission_engine.mode,
@@ -3767,6 +3779,12 @@ test {
     _ = @import("core/auth/login_flow.zig");
     _ = @import("core/auth/oauth.zig");
     _ = @import("core/auth/oauth_session.zig");
+    _ = @import("core/llm/xai.zig");
+    _ = @import("core/llm/xai_oauth.zig");
+    _ = @import("core/llm/xai_session.zig");
+    _ = @import("core/llm/xai_login.zig");
+    _ = @import("core/llm/openai_completions.zig");
+    _ = @import("core/llm/xai_provider.zig");
     _ = @import("core/workspace/file_index.zig");
     _ = @import("core/gateway/gateway_json.zig");
     _ = @import("core/github/git_context.zig");

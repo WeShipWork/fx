@@ -29,6 +29,7 @@ const gateway_schema = @import("../core/tooling/gateway_schema.zig");
 const tool_advertisement = @import("../core/tooling/tool_advertisement.zig");
 const tool_dispatch = @import("../core/tooling/tool_dispatch.zig");
 const sort_utils = @import("../core/shared/sort_utils.zig");
+const xai_provider = @import("../core/llm/xai_provider.zig");
 
 const Allocator = std.mem.Allocator;
 const FetchGatewayGetResultFn = *const fn (Allocator, ?[]const u8, []const u8) anyerror!gateway_client.GetResult;
@@ -123,10 +124,12 @@ pub const oauth_transport_provider = oauth_transport.Provider{
 
 pub const generation_usage_provider = gateway_generation_usage.provider;
 
-pub const agent_stream_provider = agent_stream_provider_contract.Provider{
+const gateway_agent_stream_provider = agent_stream_provider_contract.Provider{
     .build_fn = buildAgentRequest,
     .stream_fn = streamAgentCompletion,
 };
+
+pub const agent_stream_provider = xai_provider.wrap(gateway_agent_stream_provider);
 
 pub const provider = gateway_provider.Provider{
     .agent_stream = agent_stream_provider,

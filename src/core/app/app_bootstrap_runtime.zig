@@ -18,8 +18,9 @@ const sandbox = @import("../permissions/sandbox.zig");
 const skill_contract = @import("../skills/skill_contract.zig");
 const skill_runtime = @import("../skills/skill_runtime.zig");
 const types = @import("../shared/types.zig");
-const xai = @import("../llm/xai.zig");
 const xai_session = @import("../llm/xai_session.zig");
+const codex_session = @import("../llm/codex_session.zig");
+const native_auth = @import("../llm/native_auth.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const auto_upgrade = @import("../upgrade/auto_upgrade.zig");
 const update_target = @import("../upgrade/update_target.zig");
@@ -253,10 +254,11 @@ pub fn Runtime(comptime App: type) type {
             try app.selected_model.appendSlice(app.alloc, selected_model);
             const startup_auth_view = app.auth.view();
             if (startup_auth_view.active_source == null and !startup_auth_view.onboarding_skipped and
-                !xai.promptCredentialSatisfied(
+                !native_auth.promptCredentialSatisfied(
                     selected_model,
                     false,
                     xai_session.hasPersistedSession(app.alloc),
+                    codex_session.hasPersistedSession(app.alloc),
                 ))
             {
                 try app.auth.refreshSourceInventory(app.alloc);

@@ -5,16 +5,16 @@ const io_mod = @import("../shared/io.zig");
 const oauth = @import("../auth/oauth.zig");
 const profile_paths = @import("../shared/profile_paths.zig");
 const secret = @import("../auth/secret.zig");
-const xai = @import("xai.zig");
-const xai_oauth = @import("xai_oauth.zig");
+const codex = @import("codex.zig");
+const codex_oauth = @import("codex_oauth.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const auth_file_name = profile_paths.xai_auth_file_name;
+pub const auth_file_name = profile_paths.codex_auth_file_name;
 const schema_version: i64 = 1;
 const max_auth_file_bytes: usize = 64 * 1024;
-const mutation_lock_file_name = "xai-auth.lock";
+const mutation_lock_file_name = "codex-auth.lock";
 const mutation_lock_deadline_ms: u64 = 2000;
 
 pub const Session = struct {
@@ -25,6 +25,7 @@ pub const Session = struct {
     expires_at_ms: i64,
     scope: []u8,
     token_type: []u8,
+    account_id: []u8,
 
     pub fn deinit(self: *Session, alloc: Allocator) void {
         alloc.free(self.issuer);
@@ -33,11 +34,12 @@ pub const Session = struct {
         secret.zeroAndFree(alloc, self.refresh_token);
         alloc.free(self.scope);
         alloc.free(self.token_type);
+        alloc.free(self.account_id);
         self.* = undefined;
     }
 
     pub fn expired(self: Session, now_ms: i64) bool {
-        return self.expires_at_ms -| xai.refresh_skew_ms <= now_ms;
+        return self.expires_at_ms -| codex.refresh_skew_ms <= now_ms;
     }
 };
 
@@ -54,9 +56,11 @@ pub fn sessionFromTokenSet(
 ) !Session {
     const refresh_token = token.refresh_token orelse return error.NoRefreshToken;
     const expires_at_ms = try oauth.expiry_timestamp_ms(now_ms, token.expires_in);
-    const issuer = try alloc.dupe(u8, xai.issuer);
+    const account_id = try codex_oauth.accountIdFromAccessToken(alloc, token.access_token);
+    errdefer alloc.free(account_id);
+    const issuer = try alloc.dupe(u8, codex.issuer);
     errdefer alloc.free(issuer);
-    const client_id = try alloc.dupe(u8, xai.client_id);
+    const client_id = try alloc.dupe(u8, codex.client_id);
     errdefer alloc.free(client_id);
     const session = Session{
         .issuer = issuer,
@@ -66,6 +70,7 @@ pub fn sessionFromTokenSet(
         .expires_at_ms = expires_at_ms,
         .scope = token.scope,
         .token_type = token.token_type,
+        .account_id = account_id,
     };
     token.access_token = &.{};
     token.refresh_token = null;
@@ -82,9 +87,9 @@ pub fn parse(alloc: Allocator, bytes: []const u8) !Session {
     const version = object.get("version") orelse return error.InvalidAuthSession;
     if (version != .integer or version.integer != schema_version) return error.InvalidAuthSession;
     const provider = try requiredString(object, "provider");
-    if (!std.mem.eql(u8, provider, xai.provider_id)) return error.InvalidAuthSession;
+    if (!std.mem.eql(u8, provider, codex.provider_id)) return error.InvalidAuthSession;
     const saved_issuer = try requiredString(object, "issuer");
-    if (!std.mem.eql(u8, saved_issuer, xai.issuer)) return error.InvalidAuthSession;
+    if (!std.mem.eql(u8, saved_issuer, codex.issuer)) return error.InvalidAuthSession;
 
     const issuer = try alloc.dupe(u8, saved_issuer);
     errdefer alloc.free(issuer);
@@ -98,6 +103,8 @@ pub fn parse(alloc: Allocator, bytes: []const u8) !Session {
     errdefer alloc.free(scope);
     const token_type = try dupeRequiredString(alloc, object, "token_type");
     errdefer alloc.free(token_type);
+    const account_id = try dupeRequiredString(alloc, object, "account_id");
+    errdefer alloc.free(account_id);
     return .{
         .issuer = issuer,
         .client_id = client_id,
@@ -106,6 +113,7 @@ pub fn parse(alloc: Allocator, bytes: []const u8) !Session {
         .expires_at_ms = try requiredInteger(object, "expires_at_ms"),
         .scope = scope,
         .token_type = token_type,
+        .account_id = account_id,
     };
 }
 
@@ -114,7 +122,7 @@ pub fn stringify(alloc: Allocator, session: Session) ![]u8 {
     errdefer out.deinit();
     const writer = &out.writer;
     try writer.writeAll("{\"version\":1");
-    try writeField(writer, "provider", xai.provider_id);
+    try writeField(writer, "provider", codex.provider_id);
     try writeField(writer, "issuer", session.issuer);
     try writeField(writer, "client_id", session.client_id);
     try writeField(writer, "access_token", session.access_token);
@@ -122,6 +130,7 @@ pub fn stringify(alloc: Allocator, session: Session) ![]u8 {
     try writer.print(",\"expires_at_ms\":{d}", .{session.expires_at_ms});
     try writeField(writer, "scope", session.scope);
     try writeField(writer, "token_type", session.token_type);
+    try writeField(writer, "account_id", session.account_id);
     try writer.writeAll("}\n");
     return out.toOwnedSlice();
 }
@@ -181,7 +190,7 @@ pub fn loadValidAccessToken(
         refresh_token = try alloc.dupe(u8, session.refresh_token);
     }
 
-    var token = xai_oauth.refreshToken(alloc, transport, refresh_token.?) catch |err| {
+    var token = codex_oauth.refreshToken(alloc, transport, refresh_token.?) catch |err| {
         if (isUnrecoverableRefreshError(err)) {
             invalidateRejectedSession(alloc, refresh_token.?) catch {};
         }
@@ -363,7 +372,7 @@ fn loadFromDir(alloc: Allocator, fx_dir: *std.Io.Dir) !?Session {
     }) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => {
-            debug_trace.logf("auth", "xai session load failed step=open_file err={s}", .{@errorName(err)});
+            debug_trace.logf("auth", "codex session load failed step=open_file err={s}", .{@errorName(err)});
             return null;
         },
     };
@@ -373,7 +382,7 @@ fn loadFromDir(alloc: Allocator, fx_dir: *std.Io.Dir) !?Session {
     return parse(alloc, bytes) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => {
-            debug_trace.logf("auth", "xai session load failed step=parse err={s}", .{@errorName(err)});
+            debug_trace.logf("auth", "codex session load failed step=parse err={s}", .{@errorName(err)});
             return null;
         },
     };
@@ -402,47 +411,45 @@ fn requiredInteger(object: std.json.ObjectMap, key: []const u8) !i64 {
     return value.integer;
 }
 
-test "xAI session stringifies and parses" {
-    var session = Session{
-        .issuer = try std.testing.allocator.dupe(u8, xai.issuer),
-        .client_id = try std.testing.allocator.dupe(u8, xai.client_id),
-        .access_token = try std.testing.allocator.dupe(u8, "access"),
-        .refresh_token = try std.testing.allocator.dupe(u8, "refresh"),
-        .expires_at_ms = 1234,
-        .scope = try std.testing.allocator.dupe(u8, xai.scope),
+fn testSession(account_id: []const u8, access: []const u8, refresh: []const u8, expires_at_ms: i64) !Session {
+    return .{
+        .issuer = try std.testing.allocator.dupe(u8, codex.issuer),
+        .client_id = try std.testing.allocator.dupe(u8, codex.client_id),
+        .access_token = try std.testing.allocator.dupe(u8, access),
+        .refresh_token = try std.testing.allocator.dupe(u8, refresh),
+        .expires_at_ms = expires_at_ms,
+        .scope = try std.testing.allocator.dupe(u8, codex.scope),
         .token_type = try std.testing.allocator.dupe(u8, "Bearer"),
+        .account_id = try std.testing.allocator.dupe(u8, account_id),
     };
+}
+
+test "Codex session stringifies and parses" {
+    var session = try testSession("acct_1", "access", "refresh", 1234);
     defer session.deinit(std.testing.allocator);
 
     const text = try stringify(std.testing.allocator, session);
     defer secret.zeroAndFree(std.testing.allocator, text);
     var parsed = try parse(std.testing.allocator, text);
     defer parsed.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings(xai.issuer, parsed.issuer);
+    try std.testing.expectEqualStrings(codex.issuer, parsed.issuer);
     try std.testing.expectEqualStrings("access", parsed.access_token);
     try std.testing.expectEqualStrings("refresh", parsed.refresh_token);
+    try std.testing.expectEqualStrings("acct_1", parsed.account_id);
     try std.testing.expectEqual(@as(i64, 1234), parsed.expires_at_ms);
 }
 
-test "xAI session rejects another provider" {
+test "Codex session rejects another provider" {
     try std.testing.expectError(
         error.InvalidAuthSession,
-        parse(std.testing.allocator, "{\"version\":1,\"provider\":\"vercel\",\"issuer\":\"https://auth.x.ai\",\"client_id\":\"c\",\"access_token\":\"a\",\"refresh_token\":\"r\",\"expires_at_ms\":1,\"scope\":\"s\",\"token_type\":\"Bearer\"}"),
+        parse(std.testing.allocator, "{\"version\":1,\"provider\":\"xai\",\"issuer\":\"https://auth.openai.com\",\"client_id\":\"c\",\"access_token\":\"a\",\"refresh_token\":\"r\",\"expires_at_ms\":1,\"scope\":\"s\",\"token_type\":\"Bearer\",\"account_id\":\"acct\"}"),
     );
 }
 
-test "xAI rejected refresh deletes only the matching session file" {
+test "Codex rejected refresh deletes only the matching session file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var session = Session{
-        .issuer = try std.testing.allocator.dupe(u8, xai.issuer),
-        .client_id = try std.testing.allocator.dupe(u8, xai.client_id),
-        .access_token = try std.testing.allocator.dupe(u8, "access"),
-        .refresh_token = try std.testing.allocator.dupe(u8, "dead-refresh"),
-        .expires_at_ms = 1,
-        .scope = try std.testing.allocator.dupe(u8, xai.scope),
-        .token_type = try std.testing.allocator.dupe(u8, "Bearer"),
-    };
+    var session = try testSession("acct_1", "access", "dead-refresh", 1);
     defer session.deinit(std.testing.allocator);
     const text = try stringify(std.testing.allocator, session);
     defer secret.zeroAndFree(std.testing.allocator, text);
@@ -460,18 +467,10 @@ test "xAI rejected refresh deletes only the matching session file" {
     try std.testing.expect((try loadFromDir(std.testing.allocator, &tmp.dir)) == null);
 }
 
-test "xAI unlocked invalidation keeps a replaced session" {
+test "Codex unlocked invalidation keeps a replaced session" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var rejected = Session{
-        .issuer = try std.testing.allocator.dupe(u8, xai.issuer),
-        .client_id = try std.testing.allocator.dupe(u8, xai.client_id),
-        .access_token = try std.testing.allocator.dupe(u8, "old-access"),
-        .refresh_token = try std.testing.allocator.dupe(u8, "dead-refresh"),
-        .expires_at_ms = 1,
-        .scope = try std.testing.allocator.dupe(u8, xai.scope),
-        .token_type = try std.testing.allocator.dupe(u8, "Bearer"),
-    };
+    var rejected = try testSession("acct_old", "old-access", "dead-refresh", 1);
     defer rejected.deinit(std.testing.allocator);
     const rejected_text = try stringify(std.testing.allocator, rejected);
     defer secret.zeroAndFree(std.testing.allocator, rejected_text);
@@ -489,24 +488,16 @@ test "xAI unlocked invalidation keeps a replaced session" {
     });
     defer opened.close(std.testing.io);
 
-    var replacement = Session{
-        .issuer = try std.testing.allocator.dupe(u8, xai.issuer),
-        .client_id = try std.testing.allocator.dupe(u8, xai.client_id),
-        .access_token = try std.testing.allocator.dupe(u8, "new-access"),
-        .refresh_token = try std.testing.allocator.dupe(u8, "live-refresh"),
-        .expires_at_ms = 9_999,
-        .scope = try std.testing.allocator.dupe(u8, xai.scope),
-        .token_type = try std.testing.allocator.dupe(u8, "Bearer"),
-    };
+    var replacement = try testSession("acct_new", "new-access", "live-refresh", 9_999);
     defer replacement.deinit(std.testing.allocator);
     const replacement_text = try stringify(std.testing.allocator, replacement);
     defer secret.zeroAndFree(std.testing.allocator, replacement_text);
     {
-        var temp = try tmp.dir.createFile(std.testing.io, ".xai-auth.tmp", .{ .exclusive = true });
+        var temp = try tmp.dir.createFile(std.testing.io, ".codex-auth.tmp", .{ .exclusive = true });
         defer temp.close(std.testing.io);
         try temp.writeStreamingAll(std.testing.io, replacement_text);
     }
-    try tmp.dir.rename(".xai-auth.tmp", tmp.dir, auth_file_name, std.testing.io);
+    try tmp.dir.rename(".codex-auth.tmp", tmp.dir, auth_file_name, std.testing.io);
 
     try invalidateOpenFileIfRefreshMatches(&opened, std.testing.allocator, "dead-refresh");
     var kept = (try loadFromDir(std.testing.allocator, &tmp.dir)).?;
@@ -514,7 +505,7 @@ test "xAI unlocked invalidation keeps a replaced session" {
     try std.testing.expectEqualStrings("live-refresh", kept.refresh_token);
 }
 
-test "xAI rejected refresh errors discard the persisted session" {
+test "Codex rejected refresh errors discard the persisted session" {
     try std.testing.expect(isUnrecoverableRefreshError(error.AccessDenied));
     try std.testing.expect(isUnrecoverableRefreshError(error.ExpiredToken));
     try std.testing.expect(isUnrecoverableRefreshError(error.InvalidClient));
@@ -525,7 +516,7 @@ test "xAI rejected refresh errors discard the persisted session" {
     try std.testing.expect(!isUnrecoverableRefreshError(error.LockBusy));
 }
 
-test "xAI session expires with refresh skew" {
+test "Codex session expires with refresh skew" {
     const session = Session{
         .issuer = undefined,
         .client_id = undefined,
@@ -534,8 +525,9 @@ test "xAI session expires with refresh skew" {
         .expires_at_ms = 10_000,
         .scope = undefined,
         .token_type = undefined,
+        .account_id = undefined,
     };
     try std.testing.expect(session.expired(10_000));
-    try std.testing.expect(session.expired(10_000 - xai.refresh_skew_ms));
-    try std.testing.expect(!session.expired(10_000 - xai.refresh_skew_ms - 1));
+    try std.testing.expect(session.expired(10_000 - codex.refresh_skew_ms));
+    try std.testing.expect(!session.expired(10_000 - codex.refresh_skew_ms - 1));
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("../shared/types.zig");
+const codex = @import("../llm/codex.zig");
 
 pub const ResolvedProviderOptions = struct {
     reasoning: ?types.ReasoningEffort = null,
@@ -98,6 +99,21 @@ fn localCapabilitiesForModel(model: []const u8) Capabilities {
         capabilities.supports_vision = true;
         capabilities.supports_reasoning = true;
         capabilities.reasoning_efforts = .fromSlice(&xai_efforts);
+    } else if (std.mem.startsWith(u8, model, "openai-codex/")) {
+        const supports_max = if (codex.modelSpec(model)) |spec| spec.supports_max_effort else false;
+        const codex_efforts = [_]types.ReasoningEffort{
+            types.ReasoningEffort.literal("minimal"),
+            types.ReasoningEffort.literal("low"),
+            types.ReasoningEffort.literal("medium"),
+            types.ReasoningEffort.literal("high"),
+            types.ReasoningEffort.literal("xhigh"),
+            types.ReasoningEffort.literal("max"),
+        };
+        capabilities.parallel_tool_calls = true;
+        capabilities.supports_tool_use = true;
+        capabilities.supports_vision = true;
+        capabilities.supports_reasoning = true;
+        capabilities.reasoning_efforts = .fromSlice(if (supports_max) &codex_efforts else codex_efforts[0..5]);
     } else if (std.mem.startsWith(u8, model, "xai/")) {
         capabilities.parallel_tool_calls = true;
     }
@@ -192,6 +208,9 @@ fn localContextWindowSize(model: []const u8) ?u32 {
         return 128_000;
     }
     if (std.mem.eql(u8, model, "xai/grok-4.6") or std.mem.eql(u8, model, "grok-4.6")) return 500_000;
+    if (std.mem.startsWith(u8, model, "openai-codex/")) {
+        return if (codex.modelSpec(model)) |spec| spec.context_window else 272_000;
+    }
     if (std.mem.startsWith(u8, model, "xai/")) return 131_072;
     if (std.mem.startsWith(u8, model, "google/")) return 1_000_000;
     return null;
@@ -233,6 +252,21 @@ test "capabilities never infer reasoning or Fast controls from model IDs" {
         try std.testing.expectEqual(@as(usize, 0), capabilities.reasoning_efforts.len);
         try std.testing.expect(!capabilities.supports_fast_mode);
     }
+}
+
+test "native openai-codex models advertise Codex reasoning efforts" {
+    const gpt54 = capabilitiesForModel("openai-codex/gpt-5.4");
+    try std.testing.expect(gpt54.supports_reasoning);
+    try std.testing.expect(gpt54.supports_tool_use);
+    try std.testing.expect(gpt54.supports_vision);
+    try std.testing.expectEqual(@as(usize, 5), gpt54.reasoning_efforts.len);
+    try std.testing.expectEqual(@as(?u32, 272_000), gpt54.context_window);
+    try std.testing.expect(reasoningEffortSupported(gpt54, types.ReasoningEffort.literal("xhigh")));
+    try std.testing.expect(!reasoningEffortSupported(gpt54, types.ReasoningEffort.literal("max")));
+
+    const sol = capabilitiesForModel("openai-codex/gpt-5.6-sol");
+    try std.testing.expectEqual(@as(usize, 6), sol.reasoning_efforts.len);
+    try std.testing.expect(reasoningEffortSupported(sol, types.ReasoningEffort.literal("max")));
 }
 
 test "native grok-4.6 advertises xAI reasoning efforts" {

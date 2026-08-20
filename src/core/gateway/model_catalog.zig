@@ -374,6 +374,7 @@ pub fn compareModelCatalogEntries(_: void, a: ModelCatalogEntry, b: ModelCatalog
 fn modelProviderRank(id: []const u8) u8 {
     if (std.mem.startsWith(u8, id, "anthropic/")) return 0;
     if (std.mem.startsWith(u8, id, "openai/")) return 1;
+    if (std.mem.startsWith(u8, id, "openai-codex/")) return 1;
     if (std.mem.startsWith(u8, id, "google/")) return 2;
     if (std.mem.startsWith(u8, id, "xai/")) return 3;
     if (std.mem.startsWith(u8, id, "deepseek/")) return 4;

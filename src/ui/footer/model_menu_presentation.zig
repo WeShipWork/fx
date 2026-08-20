@@ -201,6 +201,7 @@ fn providerTabLabel(index: usize) []const u8 {
         .all => "All",
         .anthropic => "Anthropic",
         .openai => "OpenAI",
+        .codex => "Codex",
         .xai => "xAI",
         .zai => "Z.AI",
         .others => "Others",
@@ -535,17 +536,18 @@ test "model menu fixed provider tabs fit a typical terminal width" {
         .load_state = .ready,
     };
 
-    var header = try composeModelMenuRow(alloc, projection, 0, 60, 1);
+    var header = try composeModelMenuRow(alloc, projection, 0, 72, 1);
     defer header.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, header.items, "[All]") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "Anthropic") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "OpenAI") != null);
+    try std.testing.expect(std.mem.find(u8, header.items, "Codex") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "xAI") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "Z.AI") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "Others") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "…") == null);
     try std.testing.expect(std.mem.find(u8, header.items, "Provider ") == null);
-    try std.testing.expect(display_width.visibleWidthIgnoringAnsi(header.items) <= 60);
+    try std.testing.expect(display_width.visibleWidthIgnoringAnsi(header.items) <= 72);
 }
 
 test "model menu header groups secondary providers under Others" {
@@ -560,6 +562,7 @@ test "model menu header groups secondary providers under Others" {
     try std.testing.expect(std.mem.find(u8, header.items, "[All]") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "Anthropic") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "OpenAI") != null);
+    try std.testing.expect(std.mem.find(u8, header.items, "Codex") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "xAI") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "Z.AI") != null);
     try std.testing.expect(std.mem.find(u8, header.items, "Others") != null);

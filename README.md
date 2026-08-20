@@ -39,6 +39,12 @@ Or sign in with SuperGrok or X Premium for native `xai/grok-4.6`:
 fx login xai
 ```
 
+Or sign in with ChatGPT Plus or Pro for native Codex models:
+
+```bash
+fx login codex
+```
+
 Or add an AI Gateway API key:
 
 ```bash

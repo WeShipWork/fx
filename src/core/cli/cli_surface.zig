@@ -23,6 +23,8 @@ const host = @import("../hosts/host.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
 const xai_login = @import("../llm/xai_login.zig");
+const codex_login = @import("../llm/codex_login.zig");
+const codex_catalog = @import("../llm/codex_catalog.zig");
 const secret = @import("../auth/secret.zig");
 const output_contracts = @import("../output/output_contracts.zig");
 const permission_auto_classifier = @import("../permissions/auto_classifier.zig");
@@ -740,8 +742,24 @@ fn runNonInteractiveWithDeps(
                 };
                 return .handled_success;
             }
+            if (rest.len == 1 and isCodexLoginToken(rest[0])) {
+                codex_login.runLogin(
+                    alloc,
+                    cfg.gateway_provider.oauth_transport,
+                    cfg.url_opener,
+                ) catch |err| {
+                    const message = switch (err) {
+                        error.AccessDenied => "fx login codex: authorization denied\n",
+                        error.ExpiredToken, error.LoginTimedOut => "fx login codex: authorization expired; run fx login codex again\n",
+                        else => "fx login codex: failed to sign in\n",
+                    };
+                    try writeStderr(deps, message);
+                    return .handled_failure;
+                };
+                return .handled_success;
+            }
             if (rest.len != 0) {
-                try writeStderr(deps, "usage: fx login [xai]\n");
+                try writeStderr(deps, "usage: fx login [xai|codex]\n");
                 return .handled_failure;
             }
             login_flow.runLogin(
@@ -772,8 +790,19 @@ fn runNonInteractiveWithDeps(
                 );
                 return .handled_success;
             }
+            if (rest.len == 1 and isCodexLoginToken(rest[0])) {
+                const outcome = codex_login.logout() catch {
+                    try writeStderr(deps, "fx logout codex: failed to remove the Codex session\n");
+                    return .handled_failure;
+                };
+                try writeStdout(
+                    deps,
+                    if (outcome == .missing) "No Codex session found.\n" else "Signed out of Codex.\n",
+                );
+                return .handled_success;
+            }
             if (rest.len != 0) {
-                try writeStderr(deps, "usage: fx logout [xai]\n");
+                try writeStderr(deps, "usage: fx logout [xai|codex]\n");
                 return .handled_failure;
             }
             const result = login_flow.logout(alloc, cfg.gateway_provider.oauth_transport) catch |err| switch (err) {
@@ -921,6 +950,7 @@ fn runNonInteractiveWithDeps(
             };
             var ids = loaded.ids;
             defer collections.freeStringList(alloc, &ids);
+            try codex_catalog.appendModelIds(alloc, &ids);
 
             const text = try (output_contracts.ModelListSnapshot{
                 .ids = ids.items,
@@ -1492,6 +1522,10 @@ fn runGithubWorkflow(
     try writeStdout(deps, published.text);
     try writeStdout(deps, "\n");
     return .handled_success;
+}
+
+fn isCodexLoginToken(token: []const u8) bool {
+    return std.mem.eql(u8, token, "codex") or std.mem.eql(u8, token, "openai-codex");
 }
 
 fn writeStdout(deps: RunDeps, text: []const u8) !void {

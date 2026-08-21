@@ -343,7 +343,6 @@ pub const Runtime = struct {
         access: credentials.CatalogAccess,
     ) void {
         if (!self.beginLoad(access)) return;
-        const native_available = nativeCodexSessionAvailable(self.alloc);
 
         const result = model_catalog.fetchWithPublicFallback(provider, self.alloc, .{
             .access = access,
@@ -351,16 +350,19 @@ pub const Runtime = struct {
             .cancel_flag = &self.cancel_requested,
             .view = .picker,
         });
+        // Re-sample at publish time so a session flip during the fetch is
+        // reflected in the catalog that lands.
+        const publish_native = nativeCodexSessionAvailable(self.alloc);
         var loaded = switch (result) {
             .loaded => |loaded| loaded,
             .failed => |failure| {
-                if (native_available) {
+                if (publish_native) {
                     if (takeNativeCatalog(self.alloc)) |native| {
                         self.mutex.lockUncancelable(io_mod.getIo());
                         model_catalog.freeModelCatalog(self.alloc, &self.catalog);
                         self.catalog = native;
                         self.outcome = .{};
-                        self.native_codex_at_load = native_available;
+                        self.native_codex_at_load = publish_native;
                         self.state = .ready;
                         self.completion_pending = true;
                         self.mutex.unlock(io_mod.getIo());
@@ -369,16 +371,16 @@ pub const Runtime = struct {
                 }
                 self.markFailed(failure);
                 self.mutex.lockUncancelable(io_mod.getIo());
-                self.native_codex_at_load = native_available;
+                self.native_codex_at_load = publish_native;
                 self.completion_pending = true;
                 self.mutex.unlock(io_mod.getIo());
                 return;
             },
         };
-        if (native_available) mergeNativeCatalog(self.alloc, &loaded.catalog);
+        if (publish_native) mergeNativeCatalog(self.alloc, &loaded.catalog);
 
         self.mutex.lockUncancelable(io_mod.getIo());
-        self.native_codex_at_load = native_available;
+        self.native_codex_at_load = publish_native;
         if (loaded.catalog.items.len == 0 and self.outcome.loaded != null and self.catalog.items.len > 0) {
             model_catalog.freeModelCatalog(self.alloc, &loaded.catalog);
             self.outcome.last_failure = if (loaded.provenance.fallback_failure) |failure|
@@ -632,23 +634,25 @@ pub const Runtime = struct {
         var access = owned_access;
         defer access.deinit(self.alloc);
 
-        const native_available = nativeCodexSessionAvailable(self.alloc);
         const result = model_catalog.fetchWithPublicFallback(provider, self.alloc, .{
             .access = access.access,
             .endpoint = self.models_path,
             .cancel_flag = &self.cancel_requested,
             .view = .picker,
         });
+        // Re-sample at publish time so a session flip during the fetch is
+        // reflected in the catalog that lands.
+        const publish_native = nativeCodexSessionAvailable(self.alloc);
         var loaded = switch (result) {
             .loaded => |loaded| loaded,
             .failed => |failure| {
-                if (native_available) {
+                if (publish_native) {
                     if (takeNativeCatalog(self.alloc)) |native| {
                         self.mutex.lockUncancelable(io_mod.getIo());
                         model_catalog.freeModelCatalog(self.alloc, &self.catalog);
                         self.catalog = native;
                         self.outcome = .{};
-                        self.native_codex_at_load = native_available;
+                        self.native_codex_at_load = publish_native;
                         self.state = .ready;
                         self.mutex.unlock(io_mod.getIo());
                         return;
@@ -656,15 +660,15 @@ pub const Runtime = struct {
                 }
                 self.markFailed(failure);
                 self.mutex.lockUncancelable(io_mod.getIo());
-                self.native_codex_at_load = native_available;
+                self.native_codex_at_load = publish_native;
                 self.mutex.unlock(io_mod.getIo());
                 return;
             },
         };
-        if (native_available) mergeNativeCatalog(self.alloc, &loaded.catalog);
+        if (publish_native) mergeNativeCatalog(self.alloc, &loaded.catalog);
 
         self.mutex.lockUncancelable(io_mod.getIo());
-        self.native_codex_at_load = native_available;
+        self.native_codex_at_load = publish_native;
         if (loaded.catalog.items.len == 0 and self.outcome.loaded != null and self.catalog.items.len > 0) {
             model_catalog.freeModelCatalog(self.alloc, &loaded.catalog);
             self.outcome.last_failure = if (loaded.provenance.fallback_failure) |failure|

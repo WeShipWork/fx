@@ -2464,6 +2464,22 @@ fn u32TimePart(ns: i128, divisor: i128) !u32 {
     return @intCast(value);
 }
 
+/// Moves a file's modification timestamp one second ahead of its current
+/// value. Filesystem timestamp granularity is coarser than the time a test
+/// needs to rewrite a small file, so two consecutive writes can share one
+/// timestamp and a same-size content change would then look untouched.
+fn advanceFileMtime(dir: std.Io.Dir, path: []const u8) !void {
+    const io = io_mod.getIo();
+    var file = try dir.openFile(io, path, .{ .mode = .read_write });
+    defer file.close(io);
+    const stat = try file.stat(io);
+    try file.setTimestamps(io, .{
+        .modify_timestamp = .{
+            .new = .{ .nanoseconds = @intCast(stat.mtime.nanoseconds + std.time.ns_per_s) },
+        },
+    });
+}
+
 fn writeSinglePathGitIndex(dir: std.Io.Dir, index_path: []const u8, file_path: []const u8, index_rel_path: []const u8) !void {
     const alloc = std.testing.allocator;
     const stat = try dir.statFile(io_mod.getIo(), file_path, .{});
@@ -2859,6 +2875,7 @@ test "git worktree reports dirty for obvious metadata and tracked-file changes" 
         try writeTestFile(tmp.dir, "tracked/tracked.txt", "tracked\n");
         try writeSinglePathGitIndex(tmp.dir, "tracked/.git/index", "tracked/tracked.txt", "tracked.txt");
         try writeTestFile(tmp.dir, "tracked/tracked.txt", "changed\n");
+        try advanceFileMtime(tmp.dir, "tracked/tracked.txt");
         const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "tracked");
         defer alloc.free(workspace);
         const info = try collectGitInfo(arena_state.allocator(), workspace);

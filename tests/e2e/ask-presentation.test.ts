@@ -9,7 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir, userInfo } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FX_BIN, runFx } from "../evals/eval-helpers";
 import {
@@ -24,6 +24,7 @@ import {
   terminalFixtureShell,
   TmuxSession,
   tmuxAvailable,
+  writeLoginShellProfiles,
 } from "./tmux-helpers";
 
 const TIMEOUT = 30_000;
@@ -180,32 +181,13 @@ describe("fx ask presentation", () => {
   }, TIMEOUT);
 
   test("no-save advertises exec only and preserves terminal exec profiles", async () => {
-    const configuredShell = userInfo().shell;
-    if (!configuredShell.endsWith("/bash") && !configuredShell.endsWith("/zsh")) return;
-
     const root = createRoot();
-    if (configuredShell.endsWith("/zsh")) {
-      writeFileSync(
-        join(root.home, ".zprofile"),
-        "export FX_PROFILE_LOGIN=login\nexport PATH=\"$HOME/profile-bin:$PATH\"\n",
-      );
-      writeFileSync(
-        join(root.home, ".zshrc"),
-        "export FX_PROFILE_RC=rc\nalias fx_profile_alias='printf alias-user'\n" +
-          "fx_profile_function() { printf function-user; }\n",
-      );
-    } else {
-      writeFileSync(
-        join(root.home, ".bash_profile"),
-        "export FX_PROFILE_LOGIN=login\nexport PATH=\"$HOME/profile-bin:$PATH\"\n" +
-          "source \"$HOME/.bashrc\"\n",
-      );
-      writeFileSync(
-        join(root.home, ".bashrc"),
-        "export FX_PROFILE_RC=rc\nalias fx_profile_alias='printf alias-user'\n" +
-          "fx_profile_function() { printf function-user; }\n",
-      );
-    }
+    writeLoginShellProfiles(
+      root.home,
+      "export FX_PROFILE_LOGIN=login\nexport PATH=\"$HOME/profile-bin:$PATH\"\n",
+      "export FX_PROFILE_RC=rc\nalias fx_profile_alias='printf alias-user'\n" +
+        "fx_profile_function() { printf function-user; }\n",
+    );
 
     const profileCommand =
       "printf 'mode=%s:%s:' \"${FX_PROFILE_LOGIN-unset}\" \"${FX_PROFILE_RC-unset}\"; " +

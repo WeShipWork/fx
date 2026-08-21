@@ -21,6 +21,11 @@ pub fn Runtime(comptime App: type) type {
     return struct {
         fn nativeSessionCoversPrompt(app: *App) bool {
             if (comptime !@hasField(App, "selected_model")) return false;
+            // Only a native subscription model may bypass Gateway credential
+            // admission. For every other model `promptCredentialSatisfied`
+            // collapses to "a source is selected", which would admit an expired
+            // fx login without ever running the prompt refresh path.
+            if (!native_auth.isNativeSubscriptionModel(app.selected_model.items)) return false;
             return native_auth.promptCredentialSatisfied(
                 app.selected_model.items,
                 app.auth.credentialSource() != null,
@@ -674,6 +679,7 @@ const TestAuth = struct {
     refresh_failure_source: ?credentials.Source = null,
     picker_opened: bool = false,
     picker_closed: bool = false,
+    onboarding_skipped: bool = false,
     gateway_ready: bool = true,
     catalog_ready: bool = true,
     gateway_ready_after_refresh_count: ?usize = null,
@@ -684,6 +690,14 @@ const TestAuth = struct {
 
     fn credentialSource(self: *const TestAuth) ?credentials.Source {
         return self.active_source;
+    }
+
+    fn view(self: *const TestAuth) struct { onboarding_skipped: bool } {
+        return .{ .onboarding_skipped = self.onboarding_skipped };
+    }
+
+    fn pickerView(self: *const TestAuth) struct { active: bool } {
+        return .{ .active = self.picker_opened };
     }
 
     fn selectSource(self: *TestAuth, _: std.mem.Allocator, source: credentials.Source) !?bool {
@@ -739,6 +753,10 @@ const TestAuth = struct {
     }
 
     fn openPicker(self: *TestAuth, _: std.mem.Allocator) void {
+        self.picker_opened = true;
+    }
+
+    fn openOnboardingPicker(self: *TestAuth, _: std.mem.Allocator) void {
         self.picker_opened = true;
     }
 
@@ -826,9 +844,14 @@ const TestUrlOpener = struct {
     }
 };
 
+const TestSelectedModel = struct {
+    items: []const u8 = "openai/gpt-5",
+};
+
 const TestApp = struct {
     alloc: std.mem.Allocator = std.testing.allocator,
     auth: TestAuth = .{},
+    selected_model: TestSelectedModel = .{},
     model_cache: TestModelCache = .{},
     session: struct {
         usage: TestUsage = .{},
@@ -1226,6 +1249,19 @@ test "prompt credential admission rejects a credential that remains unavailable"
     try std.testing.expectEqual(@as(usize, 2), app.auth.refresh_count);
     try std.testing.expect(std.mem.find(u8, app.transcript.items, "fx login credential refresh failed.") != null);
     try std.testing.expect(app.auth.picker_opened);
+}
+
+test "prompt credential admission refreshes an expired fx login for a Gateway model" {
+    var app: TestApp = .{};
+    defer app.deinit();
+    app.auth.active_source = .fx_login;
+    app.auth.gateway_ready = false;
+    app.auth.gateway_ready_after_refresh_count = 1;
+
+    try std.testing.expect(try Runtime(TestApp).admitPromptCredential(&app));
+    try std.testing.expectEqual(@as(usize, 1), app.auth.refresh_count);
+    try std.testing.expectEqual(@as(usize, 0), app.transcript.items.len);
+    try std.testing.expect(!app.auth.picker_opened);
 }
 
 test "prompt credential refresh allows only OutOfMemory to escape" {

@@ -6560,6 +6560,16 @@ test "writable open state preserves compaction accounting after a stale event fi
     );
     try log.writePositionalAll(io_mod.getIo(), &first, 0);
     try log.sync(io_mod.getIo());
+    // Filesystem timestamp granularity is coarser than the time between the
+    // checkpoint and this rewrite, so the write alone can leave the recorded
+    // fingerprint intact. Move the modification timestamp explicitly so the
+    // fingerprint is stale on every filesystem.
+    const rewritten = try log.stat(io_mod.getIo());
+    try log.setTimestamps(io_mod.getIo(), .{
+        .modify_timestamp = .{
+            .new = .{ .nanoseconds = @intCast(rewritten.mtime.nanoseconds + std.time.ns_per_s) },
+        },
+    });
 
     var opened = try loadOpenState(
         alloc,

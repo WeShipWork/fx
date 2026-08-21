@@ -29,7 +29,7 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       channel: ${{ steps.metadata.outputs.channel }}
       npm_tag: ${{ steps.metadata.outputs.npm_tag }}
@@ -116,7 +116,7 @@ jobs:
         include:
           - runner: ubuntu-24.04
             package_platform: linux-x64
-          - runner: ubuntu-24.04-arm
+          - runner: blacksmith-4vcpu-ubuntu-2404-arm
             package_platform: linux-arm64
           - runner: macos-15-intel
             package_platform: darwin-x64
@@ -160,7 +160,7 @@ jobs:
     needs: metadata
     if: needs.metadata.outputs.should_publish == 'true'
     name: WebAssembly (ReleaseSmall)
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -198,7 +198,7 @@ jobs:
 
   publish:
     needs: [metadata, native, wasm]
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     environment: npm
     permissions:
       contents: read

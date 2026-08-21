@@ -44,6 +44,31 @@ export function terminalFixtureShell(): string {
   throw new Error("terminal fixtures require Bash or zsh");
 }
 
+/**
+ * Write login and interactive initialization files for every supported login
+ * shell inside a fixture home.
+ *
+ * fx resolves the login shell from the passwd database, so a fixture cannot
+ * infer it from `userInfo().shell`, which reports `$SHELL` under Bun. Hosts
+ * where those disagree would otherwise receive initialization files the login
+ * shell never reads. Writing both shells keeps the fixture exact for whichever
+ * shell fx selects.
+ */
+export function writeLoginShellProfiles(
+  home: string,
+  loginContents: string,
+  interactiveContents?: string,
+): void {
+  const bashLogin = interactiveContents === undefined
+    ? loginContents
+    : `${loginContents}source "$HOME/.bashrc"\n`;
+  writeFileSync(join(home, ".bash_profile"), bashLogin);
+  writeFileSync(join(home, ".zprofile"), loginContents);
+  if (interactiveContents === undefined) return;
+  writeFileSync(join(home, ".bashrc"), interactiveContents);
+  writeFileSync(join(home, ".zshrc"), interactiveContents);
+}
+
 const TMUX_RAW_PASTE_FLAGS = (() => {
   try {
     const version = execFileSync("tmux", ["-V"], { encoding: "utf8" })

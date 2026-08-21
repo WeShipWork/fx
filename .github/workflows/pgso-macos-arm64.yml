@@ -33,7 +33,7 @@ env:
 jobs:
   seed:
     name: Build seed and plan shards
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 60
     outputs:
       training: ${{ steps.plan.outputs.training }}
@@ -104,7 +104,7 @@ jobs:
   train:
     name: Train ${{ matrix.id }}
     needs: seed
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -164,7 +164,7 @@ jobs:
   candidate:
     name: Merge profiles and build candidate
     needs: [seed, train]
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -237,7 +237,7 @@ jobs:
   behavior:
     name: Verify ${{ matrix.id }}
     needs: [seed, candidate]
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -297,7 +297,7 @@ jobs:
   startup:
     name: Startup ${{ matrix.name }}
     needs: [seed, candidate]
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -352,7 +352,7 @@ jobs:
   heavy:
     name: Heavy ${{ matrix.name }}
     needs: [seed, candidate]
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -409,7 +409,7 @@ jobs:
   aggregate:
     name: Aggregate release eligibility
     needs: [candidate, behavior, startup, heavy]
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

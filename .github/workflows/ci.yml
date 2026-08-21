@@ -13,7 +13,7 @@ concurrency:
 jobs:
   zig_mode:
     name: Build & Test (${{ matrix.optimize }})
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
@@ -53,7 +53,7 @@ jobs:
     name: Build & Test
     if: ${{ always() }}
     needs: zig_mode
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Require ReleaseSafe
         env:
@@ -62,7 +62,7 @@ jobs:
 
   sdk-node-wasm:
     name: SDK (Node + WASM)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
 
@@ -89,7 +89,7 @@ jobs:
 
   sdk-node-napi:
     name: SDK (Node + N-API)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
 
@@ -111,7 +111,7 @@ jobs:
 
   sdk-browser-wasm:
     name: SDK (Browser + WASM)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
 
@@ -141,7 +141,7 @@ jobs:
 
   e2e_mode:
     name: E2E (deterministic, ${{ matrix.optimize }})
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
@@ -283,7 +283,7 @@ jobs:
     name: E2E (deterministic)
     if: ${{ always() }}
     needs: e2e_mode
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Require ReleaseSafe
         env:
@@ -292,7 +292,7 @@ jobs:
 
   cross-target:
     name: Cross-target Compile (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
@@ -326,7 +326,7 @@ jobs:
 
   lint-scripts:
     name: Shellcheck
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
 
@@ -341,7 +341,7 @@ jobs:
 
   e2e_acp_full_mode:
     name: E2E ACP (full, ${{ matrix.optimize }})
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
@@ -378,7 +378,7 @@ jobs:
     name: E2E ACP (full)
     if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs: e2e_acp_full_mode
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Require ReleaseSafe
         env:

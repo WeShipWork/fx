@@ -5,6 +5,9 @@ const collections = @import("../shared/collections.zig");
 const model_catalog = @import("../gateway/model_catalog.zig");
 const model_catalog_metadata = @import("../gateway/model_catalog_metadata.zig");
 const codex_catalog = @import("../llm/codex_catalog.zig");
+const codex = @import("../llm/codex.zig");
+const codex_session = @import("../llm/codex_session.zig");
+const profile_paths = @import("../shared/profile_paths.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
@@ -277,6 +280,9 @@ pub const Runtime = struct {
     cancel_requested: std.atomic.Value(bool) = .init(false),
     requested_access: ?model_catalog.AccessMetadata = null,
     outcome: CatalogOutcome = .{},
+    /// Codex session presence observed while producing the current catalog;
+    /// a change forces the next `beginLoad` to reload.
+    native_codex_at_load: bool = false,
     menu: ModelMenu = .{},
 
     pub fn init(alloc: Allocator, models_path: []const u8) Self {
@@ -305,6 +311,7 @@ pub const Runtime = struct {
                 .anonymous_fallback_used = false,
                 .failure = .{ .category = .resource_exhausted },
             });
+            self.recordNativeCodexPresence();
             return;
         };
 
@@ -317,8 +324,16 @@ pub const Runtime = struct {
             };
             failed_access.deinit(self.alloc);
             self.markFailed(failure);
+            self.recordNativeCodexPresence();
             return;
         };
+    }
+
+    fn recordNativeCodexPresence(self: *Self) void {
+        const present = nativeCodexSessionAvailable(self.alloc);
+        self.mutex.lockUncancelable(io_mod.getIo());
+        self.native_codex_at_load = present;
+        self.mutex.unlock(io_mod.getIo());
     }
 
     /// Loads the catalog inline for cooperative single-threaded hosts.
@@ -335,29 +350,37 @@ pub const Runtime = struct {
             .cancel_flag = &self.cancel_requested,
             .view = .picker,
         });
+        // Re-sample at publish time so a session flip during the fetch is
+        // reflected in the catalog that lands.
+        const publish_native = nativeCodexSessionAvailable(self.alloc);
         var loaded = switch (result) {
             .loaded => |loaded| loaded,
             .failed => |failure| {
-                if (takeNativeCatalog(self.alloc)) |native| {
-                    self.mutex.lockUncancelable(io_mod.getIo());
-                    model_catalog.freeModelCatalog(self.alloc, &self.catalog);
-                    self.catalog = native;
-                    self.outcome = .{};
-                    self.state = .ready;
-                    self.completion_pending = true;
-                    self.mutex.unlock(io_mod.getIo());
-                    return;
+                if (publish_native) {
+                    if (takeNativeCatalog(self.alloc)) |native| {
+                        self.mutex.lockUncancelable(io_mod.getIo());
+                        model_catalog.freeModelCatalog(self.alloc, &self.catalog);
+                        self.catalog = native;
+                        self.outcome = .{};
+                        self.native_codex_at_load = publish_native;
+                        self.state = .ready;
+                        self.completion_pending = true;
+                        self.mutex.unlock(io_mod.getIo());
+                        return;
+                    }
                 }
                 self.markFailed(failure);
                 self.mutex.lockUncancelable(io_mod.getIo());
+                self.native_codex_at_load = publish_native;
                 self.completion_pending = true;
                 self.mutex.unlock(io_mod.getIo());
                 return;
             },
         };
-        mergeNativeCatalog(self.alloc, &loaded.catalog);
+        if (publish_native) mergeNativeCatalog(self.alloc, &loaded.catalog);
 
         self.mutex.lockUncancelable(io_mod.getIo());
+        self.native_codex_at_load = publish_native;
         if (loaded.catalog.items.len == 0 and self.outcome.loaded != null and self.catalog.items.len > 0) {
             model_catalog.freeModelCatalog(self.alloc, &loaded.catalog);
             self.outcome.last_failure = if (loaded.provenance.fallback_failure) |failure|
@@ -383,6 +406,14 @@ pub const Runtime = struct {
 
     fn beginLoad(self: *Self, access: credentials.CatalogAccess) bool {
         self.finishThreadIfDone();
+
+        // A Codex session that appeared or vanished since the catalog was
+        // loaded changes its native portion, so the ready cache is stale.
+        self.mutex.lockUncancelable(io_mod.getIo());
+        const native_codex_stale = (self.state == .ready or self.state == .failed) and
+            nativeCodexSessionAvailable(self.alloc) != self.native_codex_at_load;
+        self.mutex.unlock(io_mod.getIo());
+        if (native_codex_stale) self.reset();
 
         const requested_access = model_catalog.AccessMetadata.init(access);
         self.mutex.lockUncancelable(io_mod.getIo());
@@ -609,25 +640,35 @@ pub const Runtime = struct {
             .cancel_flag = &self.cancel_requested,
             .view = .picker,
         });
+        // Re-sample at publish time so a session flip during the fetch is
+        // reflected in the catalog that lands.
+        const publish_native = nativeCodexSessionAvailable(self.alloc);
         var loaded = switch (result) {
             .loaded => |loaded| loaded,
             .failed => |failure| {
-                if (takeNativeCatalog(self.alloc)) |native| {
-                    self.mutex.lockUncancelable(io_mod.getIo());
-                    model_catalog.freeModelCatalog(self.alloc, &self.catalog);
-                    self.catalog = native;
-                    self.outcome = .{};
-                    self.state = .ready;
-                    self.mutex.unlock(io_mod.getIo());
-                    return;
+                if (publish_native) {
+                    if (takeNativeCatalog(self.alloc)) |native| {
+                        self.mutex.lockUncancelable(io_mod.getIo());
+                        model_catalog.freeModelCatalog(self.alloc, &self.catalog);
+                        self.catalog = native;
+                        self.outcome = .{};
+                        self.native_codex_at_load = publish_native;
+                        self.state = .ready;
+                        self.mutex.unlock(io_mod.getIo());
+                        return;
+                    }
                 }
                 self.markFailed(failure);
+                self.mutex.lockUncancelable(io_mod.getIo());
+                self.native_codex_at_load = publish_native;
+                self.mutex.unlock(io_mod.getIo());
                 return;
             },
         };
-        mergeNativeCatalog(self.alloc, &loaded.catalog);
+        if (publish_native) mergeNativeCatalog(self.alloc, &loaded.catalog);
 
         self.mutex.lockUncancelable(io_mod.getIo());
+        self.native_codex_at_load = publish_native;
         if (loaded.catalog.items.len == 0 and self.outcome.loaded != null and self.catalog.items.len > 0) {
             model_catalog.freeModelCatalog(self.alloc, &loaded.catalog);
             self.outcome.last_failure = if (loaded.provenance.fallback_failure) |failure|
@@ -727,6 +768,13 @@ fn mergeNativeCatalog(alloc: Allocator, catalog: *std.ArrayList(model_catalog.Mo
     std.mem.sort(model_catalog.ModelCatalogEntry, catalog.items, {}, model_catalog.compareModelCatalogEntries);
 }
 
+/// Native Codex models join a gateway catalog only while a Codex session is
+/// signed in; anonymous and gateway-only users see exactly what the gateway
+/// returned.
+fn nativeCodexSessionAvailable(alloc: Allocator) bool {
+    return codex_session.hasPersistedSession(alloc);
+}
+
 fn takeNativeCatalog(alloc: Allocator) ?std.ArrayList(model_catalog.ModelCatalogEntry) {
     var catalog: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty;
     mergeNativeCatalog(alloc, &catalog);
@@ -803,6 +851,10 @@ const TestEnv = struct {
     map: std.process.Environ.Map,
 
     fn install(alloc: Allocator, models_url: []const u8) !*TestEnv {
+        return installWithHome(alloc, models_url, null);
+    }
+
+    fn installWithHome(alloc: Allocator, models_url: []const u8, home: ?[]const u8) !*TestEnv {
         _ = try stableEmptyTestEnviron();
 
         const self = try alloc.create(TestEnv);
@@ -813,6 +865,7 @@ const TestEnv = struct {
         };
         errdefer self.map.deinit();
         try self.map.put(e2e_gateway_models_url_env, models_url);
+        if (home) |value| try self.map.put("HOME", value);
         io_mod.setEnvironMap(&self.map);
         return self;
     }
@@ -1288,6 +1341,124 @@ test "model cache warmup publishes a snapshot and filtered completion" {
 
     try std.testing.expectEqualStrings("team_123", fixture.capturedHeaderValue(test_gateway_client.vercel_ai_gateway_team_header).?);
     if (fixture.failure()) |err| return err;
+}
+
+test "model cache merges native codex models only with a persisted session" {
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.fx");
+    const session_text = try std.fmt.allocPrint(
+        alloc,
+        "{{\"version\":1,\"provider\":\"{s}\",\"issuer\":\"{s}\",\"client_id\":\"client\",\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"expires_at_ms\":4102444800000,\"scope\":\"scope\",\"token_type\":\"Bearer\",\"account_id\":\"acct\"}}",
+        .{ codex.provider_id, codex.issuer },
+    );
+    defer alloc.free(session_text);
+    {
+        const session_path = try std.fmt.allocPrint(
+            alloc,
+            "home/.fx/{s}",
+            .{profile_paths.codex_auth_file_name},
+        );
+        defer alloc.free(session_path);
+        var file = try tmp.dir.createFile(std.testing.io, session_path, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, session_text);
+    }
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+
+    var fixture = try test_gateway_client.TestModelCatalogFixture.initPrivate();
+    defer fixture.deinit();
+    try fixture.start();
+    try std.testing.expect(fixture.waitForAcceptStart(5000));
+
+    const models_url = try std.fmt.allocPrint(
+        alloc,
+        "http://127.0.0.1:{d}/v1/models",
+        .{fixture.port()},
+    );
+    defer alloc.free(models_url);
+    const env = try TestEnv.installWithHome(alloc, models_url, home);
+    defer env.deinit();
+
+    var runtime = Runtime.init(alloc, "/v1/models");
+    defer runtime.deinit();
+    runtime.startWarmup(
+        test_builtin_gateway.model_catalog_provider,
+        authenticatedCatalogAccess("test-key", "team_123"),
+    );
+    try waitForWarmup(&runtime);
+
+    var snapshot = (try runtime.snapshotCachedModelIds(alloc)).?;
+    defer collections.freeStringList(alloc, &snapshot);
+    try std.testing.expect(modelIdListContains(snapshot.items, "private/blue-hornbill"));
+    try std.testing.expect(modelIdListContains(snapshot.items, "openai-codex/gpt-5.4"));
+    if (fixture.failure()) |err| return err;
+}
+
+test "model cache reloads when the codex session appears or disappears" {
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.fx");
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    const env = try TestEnv.installWithHome(alloc, "/unused/models", home);
+    defer env.deinit();
+
+    var runtime = Runtime.init(alloc, "/v1/models");
+    defer runtime.deinit();
+    var provider = AuthChangeCatalog{ .model_id = "public/gateway-model" };
+
+    runtime.loadCooperative(provider.provider(), authenticatedCatalogAccess("test-key", "team_123"));
+    try std.testing.expect(!runtime.isFailed());
+    {
+        var snapshot = (try runtime.snapshotCachedModelIds(alloc)).?;
+        defer collections.freeStringList(alloc, &snapshot);
+        try std.testing.expect(modelIdListContains(snapshot.items, "public/gateway-model"));
+        try std.testing.expect(!modelIdListContains(snapshot.items, "openai-codex/gpt-5.4"));
+    }
+
+    const session_text = try std.fmt.allocPrint(
+        alloc,
+        "{{\"version\":1,\"provider\":\"{s}\",\"issuer\":\"{s}\",\"client_id\":\"client\",\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"expires_at_ms\":4102444800000,\"scope\":\"scope\",\"token_type\":\"Bearer\",\"account_id\":\"acct\"}}",
+        .{ codex.provider_id, codex.issuer },
+    );
+    defer alloc.free(session_text);
+    const session_path = try std.fmt.allocPrint(
+        alloc,
+        "home/.fx/{s}",
+        .{profile_paths.codex_auth_file_name},
+    );
+    defer alloc.free(session_path);
+    {
+        var file = try tmp.dir.createFile(std.testing.io, session_path, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, session_text);
+    }
+
+    runtime.loadCooperative(provider.provider(), authenticatedCatalogAccess("test-key", "team_123"));
+    try std.testing.expect(!runtime.isFailed());
+    {
+        var snapshot = (try runtime.snapshotCachedModelIds(alloc)).?;
+        defer collections.freeStringList(alloc, &snapshot);
+        try std.testing.expect(modelIdListContains(snapshot.items, "public/gateway-model"));
+        try std.testing.expect(modelIdListContains(snapshot.items, "openai-codex/gpt-5.4"));
+    }
+
+    try tmp.dir.deleteFile(std.testing.io, session_path);
+    runtime.loadCooperative(provider.provider(), authenticatedCatalogAccess("test-key", "team_123"));
+    try std.testing.expect(!runtime.isFailed());
+    {
+        var snapshot = (try runtime.snapshotCachedModelIds(alloc)).?;
+        defer collections.freeStringList(alloc, &snapshot);
+        try std.testing.expect(modelIdListContains(snapshot.items, "public/gateway-model"));
+        try std.testing.expect(!modelIdListContains(snapshot.items, "openai-codex/gpt-5.4"));
+    }
+    try std.testing.expectEqual(@as(usize, 3), provider.calls);
 }
 
 test "model menu owns resolved catalog state and filters without changing catalog order" {

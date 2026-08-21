@@ -25,6 +25,7 @@ const oauth_transport = @import("../auth/oauth_transport.zig");
 const xai_login = @import("../llm/xai_login.zig");
 const codex_login = @import("../llm/codex_login.zig");
 const codex_catalog = @import("../llm/codex_catalog.zig");
+const codex_session = @import("../llm/codex_session.zig");
 const secret = @import("../auth/secret.zig");
 const output_contracts = @import("../output/output_contracts.zig");
 const permission_auto_classifier = @import("../permissions/auto_classifier.zig");
@@ -305,6 +306,7 @@ const EnvironMapFn = *const fn (?*anyopaque) ?*const std.process.Environ.Map;
 const SelfExePathFn = *const fn (?*anyopaque, Allocator) anyerror![]u8;
 const ReadMaskedKeyFn = *const fn (?*anyopaque, Allocator, WriteFn, ?*anyopaque) anyerror![]u8;
 const SetupTerminalAvailableFn = *const fn (?*anyopaque) bool;
+const HasNativeCodexSessionFn = *const fn (Allocator) bool;
 const RunDeps = struct {
     stdout_ctx: ?*anyopaque = null,
     stderr_ctx: ?*anyopaque = null,
@@ -322,6 +324,7 @@ const RunDeps = struct {
     self_exe_path: SelfExePathFn = selfExePathDefault,
     read_masked_key: ReadMaskedKeyFn = readMaskedKeyDefault,
     setup_terminal_available: SetupTerminalAvailableFn = setupTerminalAvailableDefault,
+    has_native_codex_session: HasNativeCodexSessionFn = codex_session.hasPersistedSession,
 };
 
 const GlobalLaunchArgs = struct {
@@ -950,7 +953,9 @@ fn runNonInteractiveWithDeps(
             };
             var ids = loaded.ids;
             defer collections.freeStringList(alloc, &ids);
-            try codex_catalog.appendModelIds(alloc, &ids);
+            if (deps.has_native_codex_session(alloc)) {
+                try codex_catalog.appendModelIds(alloc, &ids);
+            }
 
             const text = try (output_contracts.ModelListSnapshot{
                 .ids = ids.items,
@@ -4618,6 +4623,7 @@ test "runIfRequested models passes startup team to fetch seam" {
 
     var deps = capture.deps();
     deps.load_catalog_startup_state = stubLoadCatalogStartupState;
+    deps.has_native_codex_session = stubCodexSessionAbsent;
 
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("models"), @constCast("--json") }, cfg, deps);
     try std.testing.expectEqual(RunResult.handled_success, result);
@@ -4626,6 +4632,24 @@ test "runIfRequested models passes startup team to fetch seam" {
         "{\"kind\":\"models\",\"count\":1,\"shown_count\":1,\"more_count\":0,\"private_models_hidden\":false,\"ids\":[\"private/blue-hornbill\"]}\n",
         capture.stdout.written(),
     );
+}
+
+test "runIfRequested models appends native codex ids only with a codex session" {
+    var capture = CaptureOutput.init(std.testing.allocator);
+    defer capture.deinit();
+    var probe = ModelFetchProbe{};
+    var cfg = testConfig();
+    cfg.gateway_provider.cli_model_catalog = probe.provider();
+
+    var deps = capture.deps();
+    deps.load_catalog_startup_state = stubLoadCatalogStartupState;
+    deps.has_native_codex_session = stubCodexSessionPresent;
+
+    const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("models"), @constCast("--json") }, cfg, deps);
+    try std.testing.expectEqual(RunResult.handled_success, result);
+    const written = capture.stdout.written();
+    try std.testing.expect(std.mem.indexOf(u8, written, "\"openai-codex/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "\"private/blue-hornbill\"") != null);
 }
 
 test "runIfRequested credits renders through the configured provider" {
@@ -5079,6 +5103,14 @@ fn stubLoadCatalogStartupState(
     default_agent_step_limit: usize,
 ) !app_lifecycle.StartupState {
     return stubLoadStartupState(alloc, oauth_transport.unavailable_provider, secret_store, default_model, default_agent_step_limit);
+}
+
+fn stubCodexSessionAbsent(_: Allocator) bool {
+    return false;
+}
+
+fn stubCodexSessionPresent(_: Allocator) bool {
+    return true;
 }
 
 fn stubLoadStartupStatus(

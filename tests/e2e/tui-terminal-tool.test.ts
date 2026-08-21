@@ -12,7 +12,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { userInfo } from "node:os";
 import { join } from "node:path";
 import { FX_BIN } from "../evals/eval-helpers";
 import {
@@ -25,6 +24,7 @@ import {
   terminalFixtureShell,
   TmuxSession,
   tmuxAvailable,
+  writeLoginShellProfiles,
 } from "./tmux-helpers";
 
 const TIMEOUT = 30_000;
@@ -34,12 +34,6 @@ const roots: string[] = [];
 const fixtureHomes: string[] = [];
 const transportRoots = new Set<string>();
 const gateways: Array<ReturnType<typeof startFakeGateway>> = [];
-const loginProfileName = (() => {
-  const shell = userInfo().shell;
-  if (shell.endsWith("/zsh")) return ".zprofile";
-  if (shell.endsWith("/bash")) return ".bash_profile";
-  return null;
-})();
 
 afterEach(async () => {
   for (const root of roots) writeFileSync(join(root, ".terminal-stop"), "");
@@ -2838,14 +2832,14 @@ test.skipIf(!tmuxAvailable())(
   45_000,
 );
 
-test.skipIf(!tmuxAvailable() || loginProfileName === null)(
+test.skipIf(!tmuxAvailable())(
   "failed direct start stays responsive and publishes one structured final notice",
   async () => {
     const fixture = createFixture("fx-tui-terminal-failed-start-");
     const profileStartedPath = join(fixture.root, "profile-started");
     const profilePidPath = join(fixture.root, "profile.pid");
-    writeFileSync(
-      join(fixture.home, loginProfileName!),
+    writeLoginShellProfiles(
+      fixture.home,
       `printf started > ${JSON.stringify(profileStartedPath)}\n` +
         `printf '%s' "$$" > ${JSON.stringify(profilePidPath)}\n` +
         "sleep 4\n" +

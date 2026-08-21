@@ -280,6 +280,9 @@ pub const Runtime = struct {
     cancel_requested: std.atomic.Value(bool) = .init(false),
     requested_access: ?model_catalog.AccessMetadata = null,
     outcome: CatalogOutcome = .{},
+    /// Codex session presence observed while producing the current catalog;
+    /// a change forces the next `beginLoad` to reload.
+    native_codex_at_load: bool = false,
     menu: ModelMenu = .{},
 
     pub fn init(alloc: Allocator, models_path: []const u8) Self {
@@ -308,6 +311,7 @@ pub const Runtime = struct {
                 .anonymous_fallback_used = false,
                 .failure = .{ .category = .resource_exhausted },
             });
+            self.recordNativeCodexPresence();
             return;
         };
 
@@ -320,8 +324,16 @@ pub const Runtime = struct {
             };
             failed_access.deinit(self.alloc);
             self.markFailed(failure);
+            self.recordNativeCodexPresence();
             return;
         };
+    }
+
+    fn recordNativeCodexPresence(self: *Self) void {
+        const present = nativeCodexSessionAvailable(self.alloc);
+        self.mutex.lockUncancelable(io_mod.getIo());
+        self.native_codex_at_load = present;
+        self.mutex.unlock(io_mod.getIo());
     }
 
     /// Loads the catalog inline for cooperative single-threaded hosts.
@@ -331,6 +343,7 @@ pub const Runtime = struct {
         access: credentials.CatalogAccess,
     ) void {
         if (!self.beginLoad(access)) return;
+        const native_available = nativeCodexSessionAvailable(self.alloc);
 
         const result = model_catalog.fetchWithPublicFallback(provider, self.alloc, .{
             .access = access,
@@ -341,12 +354,13 @@ pub const Runtime = struct {
         var loaded = switch (result) {
             .loaded => |loaded| loaded,
             .failed => |failure| {
-                if (nativeCodexSessionAvailable(self.alloc)) {
+                if (native_available) {
                     if (takeNativeCatalog(self.alloc)) |native| {
                         self.mutex.lockUncancelable(io_mod.getIo());
                         model_catalog.freeModelCatalog(self.alloc, &self.catalog);
                         self.catalog = native;
                         self.outcome = .{};
+                        self.native_codex_at_load = native_available;
                         self.state = .ready;
                         self.completion_pending = true;
                         self.mutex.unlock(io_mod.getIo());
@@ -355,14 +369,16 @@ pub const Runtime = struct {
                 }
                 self.markFailed(failure);
                 self.mutex.lockUncancelable(io_mod.getIo());
+                self.native_codex_at_load = native_available;
                 self.completion_pending = true;
                 self.mutex.unlock(io_mod.getIo());
                 return;
             },
         };
-        if (nativeCodexSessionAvailable(self.alloc)) mergeNativeCatalog(self.alloc, &loaded.catalog);
+        if (native_available) mergeNativeCatalog(self.alloc, &loaded.catalog);
 
         self.mutex.lockUncancelable(io_mod.getIo());
+        self.native_codex_at_load = native_available;
         if (loaded.catalog.items.len == 0 and self.outcome.loaded != null and self.catalog.items.len > 0) {
             model_catalog.freeModelCatalog(self.alloc, &loaded.catalog);
             self.outcome.last_failure = if (loaded.provenance.fallback_failure) |failure|
@@ -388,6 +404,14 @@ pub const Runtime = struct {
 
     fn beginLoad(self: *Self, access: credentials.CatalogAccess) bool {
         self.finishThreadIfDone();
+
+        // A Codex session that appeared or vanished since the catalog was
+        // loaded changes its native portion, so the ready cache is stale.
+        self.mutex.lockUncancelable(io_mod.getIo());
+        const native_codex_stale = (self.state == .ready or self.state == .failed) and
+            nativeCodexSessionAvailable(self.alloc) != self.native_codex_at_load;
+        self.mutex.unlock(io_mod.getIo());
+        if (native_codex_stale) self.reset();
 
         const requested_access = model_catalog.AccessMetadata.init(access);
         self.mutex.lockUncancelable(io_mod.getIo());
@@ -608,6 +632,7 @@ pub const Runtime = struct {
         var access = owned_access;
         defer access.deinit(self.alloc);
 
+        const native_available = nativeCodexSessionAvailable(self.alloc);
         const result = model_catalog.fetchWithPublicFallback(provider, self.alloc, .{
             .access = access.access,
             .endpoint = self.models_path,
@@ -617,24 +642,29 @@ pub const Runtime = struct {
         var loaded = switch (result) {
             .loaded => |loaded| loaded,
             .failed => |failure| {
-                if (nativeCodexSessionAvailable(self.alloc)) {
+                if (native_available) {
                     if (takeNativeCatalog(self.alloc)) |native| {
                         self.mutex.lockUncancelable(io_mod.getIo());
                         model_catalog.freeModelCatalog(self.alloc, &self.catalog);
                         self.catalog = native;
                         self.outcome = .{};
+                        self.native_codex_at_load = native_available;
                         self.state = .ready;
                         self.mutex.unlock(io_mod.getIo());
                         return;
                     }
                 }
                 self.markFailed(failure);
+                self.mutex.lockUncancelable(io_mod.getIo());
+                self.native_codex_at_load = native_available;
+                self.mutex.unlock(io_mod.getIo());
                 return;
             },
         };
-        if (nativeCodexSessionAvailable(self.alloc)) mergeNativeCatalog(self.alloc, &loaded.catalog);
+        if (native_available) mergeNativeCatalog(self.alloc, &loaded.catalog);
 
         self.mutex.lockUncancelable(io_mod.getIo());
+        self.native_codex_at_load = native_available;
         if (loaded.catalog.items.len == 0 and self.outcome.loaded != null and self.catalog.items.len > 0) {
             model_catalog.freeModelCatalog(self.alloc, &loaded.catalog);
             self.outcome.last_failure = if (loaded.provenance.fallback_failure) |failure|
@@ -1362,6 +1392,69 @@ test "model cache merges native codex models only with a persisted session" {
     try std.testing.expect(modelIdListContains(snapshot.items, "private/blue-hornbill"));
     try std.testing.expect(modelIdListContains(snapshot.items, "openai-codex/gpt-5.4"));
     if (fixture.failure()) |err| return err;
+}
+
+test "model cache reloads when the codex session appears or disappears" {
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.fx");
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    const env = try TestEnv.installWithHome(alloc, "/unused/models", home);
+    defer env.deinit();
+
+    var runtime = Runtime.init(alloc, "/v1/models");
+    defer runtime.deinit();
+    var provider = AuthChangeCatalog{ .model_id = "public/gateway-model" };
+
+    runtime.loadCooperative(provider.provider(), authenticatedCatalogAccess("test-key", "team_123"));
+    try std.testing.expect(!runtime.isFailed());
+    {
+        var snapshot = (try runtime.snapshotCachedModelIds(alloc)).?;
+        defer collections.freeStringList(alloc, &snapshot);
+        try std.testing.expect(modelIdListContains(snapshot.items, "public/gateway-model"));
+        try std.testing.expect(!modelIdListContains(snapshot.items, "openai-codex/gpt-5.4"));
+    }
+
+    const session_text = try std.fmt.allocPrint(
+        alloc,
+        "{{\"version\":1,\"provider\":\"{s}\",\"issuer\":\"{s}\",\"client_id\":\"client\",\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"expires_at_ms\":4102444800000,\"scope\":\"scope\",\"token_type\":\"Bearer\",\"account_id\":\"acct\"}}",
+        .{ codex.provider_id, codex.issuer },
+    );
+    defer alloc.free(session_text);
+    const session_path = try std.fmt.allocPrint(
+        alloc,
+        "home/.fx/{s}",
+        .{profile_paths.codex_auth_file_name},
+    );
+    defer alloc.free(session_path);
+    {
+        var file = try tmp.dir.createFile(std.testing.io, session_path, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, session_text);
+    }
+
+    runtime.loadCooperative(provider.provider(), authenticatedCatalogAccess("test-key", "team_123"));
+    try std.testing.expect(!runtime.isFailed());
+    {
+        var snapshot = (try runtime.snapshotCachedModelIds(alloc)).?;
+        defer collections.freeStringList(alloc, &snapshot);
+        try std.testing.expect(modelIdListContains(snapshot.items, "public/gateway-model"));
+        try std.testing.expect(modelIdListContains(snapshot.items, "openai-codex/gpt-5.4"));
+    }
+
+    try tmp.dir.deleteFile(std.testing.io, session_path);
+    runtime.loadCooperative(provider.provider(), authenticatedCatalogAccess("test-key", "team_123"));
+    try std.testing.expect(!runtime.isFailed());
+    {
+        var snapshot = (try runtime.snapshotCachedModelIds(alloc)).?;
+        defer collections.freeStringList(alloc, &snapshot);
+        try std.testing.expect(modelIdListContains(snapshot.items, "public/gateway-model"));
+        try std.testing.expect(!modelIdListContains(snapshot.items, "openai-codex/gpt-5.4"));
+    }
+    try std.testing.expectEqual(@as(usize, 3), provider.calls);
 }
 
 test "model menu owns resolved catalog state and filters without changing catalog order" {
